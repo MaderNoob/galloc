@@ -30,16 +30,13 @@ impl Allocator {
         let cur_chunk_ref_from_back = &mut self.free_chunk;
         while let Some(cur_chunk_ptr) = cur_chunk_ref_from_back {
             let cur_chunk = unsafe { cur_chunk_ptr.as_mut() };
-            // if the chunk is not aligned, fix the alignment
             if unsafe { is_aligned(cur_chunk.header.content_addr(), layout_align) } {
                 // already aligned
-                if let Some(ptr) =
-                    self.heap_region
-                        .alloc_aligned(layout_size, cur_chunk, cur_chunk_ref_from_back)
-                {
+                if let Some(ptr) = self.heap_region.alloc_aligned(layout_size, cur_chunk) {
                     return ptr.as_ptr();
                 }
             } else {
+                // the chunk is not aligned
                 if let Some(ptr) =
                     self.heap_region
                         .alloc_unaligned(layout_size, layout_align, cur_chunk)
@@ -94,7 +91,12 @@ impl HeapRegion {
         let cur_chunk_new_size = aligned_start_addr - cur_chunk.header.content_addr();
         cur_chunk.set_size(cur_chunk_new_size);
 
-        todo!()
+        Some(self.alloc_unaligned_after_splitting_start_padding(
+            layout_size,
+            aligned_start_addr,
+            left_size,
+            cur_chunk,
+        ))
     }
 
     /// Allocates an unaligned chunk after splitting its start padding to a
@@ -120,7 +122,6 @@ impl HeapRegion {
                         layout_size,
                         end_padding,
                         allocated_chunk_addr,
-                        allocated_chunk_size,
                         start_padding_chunk,
                     )
                 }
@@ -164,11 +165,14 @@ impl HeapRegion {
         allocated_chunk_addr: usize,
         allocated_chunk_size: usize,
     ) -> NonNull<u8> {
+        // we already split of the start padding and we don't need no end padding, so
+        // just create a used chunk in the available space.
+        //
         // third argument is the `prev_in_use` bit of the created chunk. the chunk
-        // before the allocated chunk is the start padding chunk, which is not in use,
-        // thus the third argument is `false`.
+        // before the allocated chunk is the start padding chunk, which is not in
+        // use, thus the third argument is `false`.
         let chunk = unsafe {
-            UsedChunk::create_new_and_update_next_chunk(
+            UsedChunk::create_new(
                 allocated_chunk_addr,
                 allocated_chunk_size,
                 false,
@@ -196,42 +200,40 @@ impl HeapRegion {
         layout_size: usize,
         end_padding: usize,
         allocated_chunk_addr: usize,
-        allocated_chunk_size: usize,
         start_padding_chunk: FreeChunkRef,
     ) -> NonNull<u8> {
         // the end address of the allocated chunk that will be returned to the user.
         // this is also the start address of the end padding chunk.
         let allocated_chunk_end_addr = allocated_chunk_addr + HEADER_SIZE + layout_size;
 
-        // this unsafe block created an end padding chunk and links it to the linked
-        // list of free chunks.
-        unsafe {
-            // this new chunk will be put between the start padding chunk and its fd chunk,
-            // so it should point to the fd of the start padding chunk.
-            let end_padding_chunk = FreeChunk::create_new(
-                allocated_chunk_end_addr,
-                end_padding,
-                start_padding_chunk.fd,
-            );
-
-            // there is no need to update the next chunk because it's prev in use bit is
-            // already set to false, as it should be.
-
-            // we must now make sure that some free chunk points to the created end padding
-            // chunk, to make sure that it's part of the linked list.
-            // we do that by making the start padding chunk point to this chunk.
-            start_padding_chunk.fd = Some(end_padding_chunk);
-        };
-
-        // we must now create a used chunk for the allocated chunk.
-        // note that there is no need to update the next chunk that its prev is in use,
-        // because the next chunk was created using `FreeChunk::create_new`, which
-        // automatically sets the prev in use flag to true.
+        // create an end padding chunk.
         //
-        // also, the prev chunk before the new created chunk is the start padding chunk,
-        // which is not in use, so the third argument is `false`.
-        let allocated_chunk =
-            UsedChunk::create_new(allocated_chunk_addr, allocated_chunk_size, false);
+        // this chunk will be put between the start padding and the start padding's fd
+        // chunk, so its fd will be the start padding's fd, and its bk will be the start
+        // padding chunk.
+        //
+        // there is no need to update the next chunk because it's prev in use bit is
+        // already set to false, as it should be.
+        let _ = FreeChunk::create_new_without_updating_next_chunk(
+            allocated_chunk_end_addr,
+            end_padding,
+            start_padding_chunk.fd,
+            &mut start_padding_chunk.fd,
+        );
+
+        // now create a used chunk for the allocated chunk.
+        //
+        // note that there is no need to update the next chunk, which will be the end
+        // padding chunk, because when creating a free chunk the prev in use flag is
+        // already set to false.
+        //
+        // also note that the chunk before the allocated chunk is the start padding
+        // chunk which is free and not in use, thus the third argument is `false`.
+        let allocated_chunk = UsedChunk::create_new_without_updating_next_chunk(
+            allocated_chunk_addr,
+            layout_size,
+            false,
+        );
 
         NonNull::new_unchecked(allocated_chunk as *mut _ as *mut u8)
     }
@@ -242,7 +244,6 @@ impl HeapRegion {
         &mut self,
         layout_size: usize,
         cur_chunk: FreeChunkRef,
-        cur_chunk_ref_from_back: &mut Option<FreeChunkPtr>,
     ) -> Option<NonNull<u8>> {
         let cur_chunk_size = cur_chunk.header.size();
         // first make sure that the chunk is big enough to hold the allocation.
@@ -259,12 +260,7 @@ impl HeapRegion {
                 // there.
                 Some(unsafe {
                     // this is safe because we checked that `end_padding` is big enough
-                    self.alloc_aligned_split_end_padding_chunk(
-                        layout_size,
-                        end_padding,
-                        cur_chunk,
-                        cur_chunk_ref_from_back,
-                    )
+                    self.alloc_aligned_split_end_padding_chunk(layout_size, end_padding, cur_chunk)
                 })
             } else {
                 // if the end padding is not large enough to hold a free chunk, consider it a
@@ -273,22 +269,18 @@ impl HeapRegion {
                 // when we have enough space.
 
                 // this case can be considered the same as allocating without any end padding.
-                Some(self.alloc_aligned_no_end_padding(cur_chunk, cur_chunk_ref_from_back))
+                Some(self.alloc_aligned_no_end_padding(cur_chunk))
             }
         } else {
             // if there is no end padding
-            Some(self.alloc_aligned_no_end_padding(cur_chunk, cur_chunk_ref_from_back))
+            Some(self.alloc_aligned_no_end_padding(cur_chunk))
         }
     }
 
     /// Allocates an aligned chunk without any end padding.
-    fn alloc_aligned_no_end_padding(
-        &mut self,
-        cur_chunk: FreeChunkRef,
-        cur_chunk_ref_from_back: &mut Option<FreeChunkPtr>,
-    ) -> NonNull<u8> {
+    fn alloc_aligned_no_end_padding(&mut self, cur_chunk: FreeChunkRef) -> NonNull<u8> {
         // mark the chunk as used and make the necessary updates
-        cur_chunk.mark_as_used_unlink(cur_chunk_ref_from_back, self.heap_end_addr);
+        cur_chunk.mark_as_used_unlink(self.heap_end_addr);
 
         // retrun the chunk to the user
         unsafe { NonNull::new_unchecked(cur_chunk as *mut _ as *mut u8) }
@@ -305,36 +297,30 @@ impl HeapRegion {
         layout_size: usize,
         end_padding: usize,
         cur_chunk: FreeChunkRef,
-        cur_chunk_ref_from_back: &mut Option<FreeChunkPtr>,
     ) -> NonNull<u8> {
         // the end address of the allocated chunk that will be returned to the user.
         // this is also the start address of the end padding chunk.
         let allocated_chunk_end_addr = cur_chunk.header.content_addr() + layout_size;
 
-        // this unsafe block splits an end padding chunk from the current chunk and
-        // marks it as used. it returns a reference to `cur_chunk` but as a
-        // `UsedChunkRef`.
-        let allocated_chunk = unsafe {
-            // this new chunk will be put inside the linked list of free chunks in place
-            // of the current chunk, so its `fd` should be the `fd` of the current chunk.
-            let end_padding_chunk =
-                FreeChunk::create_new(allocated_chunk_end_addr, end_padding, cur_chunk.fd);
+        // create a free chunk for the end padding.
+        // this will also unlink `cur_chunk` from the linked list and put the end
+        // padding chunk in place of it.
+        //
+        // there is no need to update the next chunk because it's prev in use bit is
+        // already set to false, as it should be.
+        let _ = FreeChunk::create_new_without_updating_next_chunk(
+            allocated_chunk_end_addr,
+            end_padding,
+            cur_chunk.fd,
+            cur_chunk.ptr_to_fd_of_bk,
+        );
 
-            // there is no need to update the next chunk because it's prev in use bit is
-            // already set to false, as it should be.
+        // this is safe because we already removed `cur_chunk` from the freelist, so
+        // there's no need to update the freelist again.
+        cur_chunk.mark_as_used_without_updating_freelist(self.heap_end_addr);
 
-            // we must now make sure that some free chunk points to the created end padding
-            // chunk, to make sure that it's part of the linked list.
-            // we can do that by marking the current chunk as used, and placing the end
-            // padding chunk in place of it.
-            cur_chunk.mark_as_used(
-                cur_chunk_ref_from_back,
-                Some(end_padding_chunk),
-                self.heap_end_addr,
-            )
-        };
-
-        NonNull::new_unchecked(allocated_chunk as *mut _ as *mut u8)
+        // return a pointer to the allocated chunk
+        NonNull::new_unchecked(cur_chunk as *mut _ as *mut u8)
     }
 }
 
@@ -348,6 +334,9 @@ pub struct UsedChunk(Chunk);
 pub struct FreeChunk {
     header: Chunk,
     fd: Option<FreeChunkPtr>,
+
+    /// A pointer to the `fd` field of the back chunk.
+    ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
 }
 
 pub type FreeChunkRef = &'static mut FreeChunk;
@@ -485,7 +474,11 @@ impl UsedChunk {
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
     ///  - The chunk's next chunk, if any, must be updated that its previous
     ///    chunk is now in use.
-    pub unsafe fn create_new(addr: usize, size: usize, prev_in_use: bool) -> UsedChunkRef {
+    pub unsafe fn create_new_without_updating_next_chunk(
+        addr: usize,
+        size: usize,
+        prev_in_use: bool,
+    ) -> UsedChunkRef {
         let ptr = addr as *mut UsedChunk;
 
         // write the chunk header and content
@@ -502,14 +495,14 @@ impl UsedChunk {
     ///  - `addr` must be a valid non-null memory address which is not used by
     ///    any other chunk.
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    pub unsafe fn create_new_and_update_next_chunk(
+    pub unsafe fn create_new(
         addr: usize,
         size: usize,
         prev_in_use: bool,
         heap_end_addr: usize,
     ) -> UsedChunkRef {
         // create a new used chunk
-        let chunk = UsedChunk::create_new(addr, size, prev_in_use);
+        let chunk = UsedChunk::create_new_without_updating_next_chunk(addr, size, prev_in_use);
 
         // update the next chunk
         if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(heap_end_addr) {
@@ -532,22 +525,31 @@ impl FreeChunk {
         &mut *(addr as *mut FreeChunk)
     }
 
+    /// Returns a mutable reference to the fd chunk.
+    pub fn fd(&mut self) -> Option<FreeChunkRef> {
+        self.fd.map(|mut fd| unsafe { fd.as_mut() })
+    }
+
+    /// Returns a mutable reference to this chunk's postfix size.
+    pub fn postfix_size(&mut self) -> &mut usize {
+        let postfix_size_ptr = (self.header.end_addr() - USIZE_SIZE) as *mut usize;
+        unsafe { &mut *postfix_size_ptr }
+    }
+
     /// Sets the size of this free chunk and updates the postfix size.
     pub fn set_size(&mut self, new_size: usize) {
         self.header.set_size(new_size);
-        let postfix_size_ptr = (self.header.end_addr() - USIZE_SIZE) as *mut usize;
-        unsafe { *postfix_size_ptr = new_size }
+        *self.postfix_size() = new_size;
     }
 
-    /// Marks this free chunk as used, updates its next chunk, and replaces
-    /// the current chunk in the linked list of free chunks with
-    /// `replace_in_linked_list_with`.
-    pub fn mark_as_used(
-        &mut self,
-        cur_chunk_ref_from_back: &mut Option<FreeChunkPtr>,
-        replace_in_linked_list_with: Option<FreeChunkPtr>,
-        heap_end_addr: usize,
-    ) -> UsedChunkRef {
+    /// Marks this free chunk as used and updates its next chunk, but without
+    /// updating the linked list of free chunks.
+    ///
+    /// # Safety
+    ///
+    /// You must make sure to remove this chunk from the linked list of free
+    /// chunks, since it is now used.
+    pub unsafe fn mark_as_used_without_updating_freelist(&mut self, heap_end_addr: usize) {
         // mark as used
         self.header.set_is_free(false);
 
@@ -556,58 +558,81 @@ impl FreeChunk {
             let next_chunk = unsafe { UsedChunk::from_addr(next_chunk_addr) };
             next_chunk.0.set_prev_in_use(true);
         }
-
-        // unlink the current chunk from the linked list
-        *cur_chunk_ref_from_back = replace_in_linked_list_with;
-
-        unsafe { core::mem::transmute(self) }
     }
 
     /// Marks this free chunk as used, updates its next chunk, and unlinks this
     /// chunk from the linked list of free chunks.
-    pub fn mark_as_used_unlink(
-        &mut self,
-        cur_chunk_ref_from_back: &mut Option<FreeChunkPtr>,
-        heap_end_addr: usize,
-    ) -> UsedChunkRef {
-        self.mark_as_used(cur_chunk_ref_from_back, self.fd, heap_end_addr)
+    pub fn mark_as_used_unlink(&mut self, heap_end_addr: usize) -> UsedChunkRef {
+        // this is safe because we then unlink it.
+        unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) }
+
+        // unlink this chunk from the linked list of free chunks, to do that we
+        // need to change the state:
+        // ```
+        // bk <-> self <-> fd
+        // ```
+        // to the state:
+        // ```
+        // bk <-> fd
+        // ```
+
+        // make bk point to fd
+        unsafe { *self.ptr_to_fd_of_bk = self.fd };
+
+        // make fd point back to bk
+        if let Some(fd) = self.fd() {
+            fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
+        }
+
+        unsafe { core::mem::transmute(self) }
     }
 
     /// Creates a new free chunk at the given address, with the given size.
-    /// The new chunk will point to `fd`, will be marked as free, and its
-    /// `prev_in_use` flag will be set to `true`, because no 2 free chunks
-    /// can be adjacent.
+    ///
+    /// The new chunk will be marked as free, and its `prev_in_use` flag will be
+    /// set to `true`, because no 2 free chunks can be adjacent.
+    ///
+    /// The new chunk will also be linked into the linked list between fd and
+    /// bk.
     ///
     /// # Safety
     ///
     ///  - `addr` must be a valid non-null memory address which is not used by
     ///    any other chunk.
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    ///  - The chunk must be pointed at from a back chunk that is in the linked
-    ///    list of free chunks.
     ///  - The chunk's next chunk, if any, must be updated that its previous
     ///    chunk is now free.
-    pub unsafe fn create_new(addr: usize, size: usize, fd: Option<FreeChunkPtr>) -> FreeChunkPtr {
-        let ptr = addr as *mut FreeChunk;
+    pub unsafe fn create_new_without_updating_next_chunk(
+        addr: usize,
+        size: usize,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+    ) -> FreeChunkPtr {
+        let created_chunk_ref = FreeChunk::from_addr(addr);
 
         // write the chunk header and content
-        *ptr = FreeChunk {
-            // last argument is the `prev_in_use` flag, and there are no 2 adjacent free
-            // chunks, so the previous chunk is surely unused, thus last argument is `false`.
+        *created_chunk_ref = FreeChunk {
+            // last argument is the `prev_in_use` flag, and there are no 2 adjacent free chunks, so
+            // the previous chunk is surely unused, thus last argument is `false`.
             header: Chunk::new_unchecked(size, true, false),
             fd,
+            ptr_to_fd_of_bk,
         };
 
-        // dont forget to write the postfix size at the end of the chunk
-        //
-        // first find the end address of this chunk
-        let end_addr = addr + HEADER_SIZE + size;
-        // use the end address to find the address of the posfix size
-        let postfix_size_ptr = (end_addr - USIZE_SIZE) as *mut usize;
-        // write the posfix size
-        unsafe { *postfix_size_ptr = size }
+        // write the postfix size at the end of the chunk
+        *created_chunk_ref.postfix_size() = size;
 
-        FreeChunkPtr::new_unchecked(ptr)
+        // update the freelist.
+        //
+        // make `fd` point back to this chunk
+        if let Some(mut fd) = fd {
+            let fd_ref = fd.as_mut();
+            fd_ref.ptr_to_fd_of_bk = &mut created_chunk_ref.fd;
+        }
+        // make `bk` point to this chunk
+        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(addr as *mut _));
+
+        FreeChunkPtr::new_unchecked(addr as *mut _)
     }
 }
 
