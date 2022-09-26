@@ -1,12 +1,20 @@
+mod alignment;
+mod chunks;
+mod divisible_by_4_usize;
+
+use alignment::*;
+use chunks::*;
+use core::pin::Pin;
 use core::ptr::NonNull;
+use divisible_by_4_usize::*;
 
 fn main() {}
 
-const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
-const USIZE_SIZE: usize = core::mem::size_of::<usize>();
-const MIN_ALIGNMENT: usize = USIZE_ALIGNMENT;
-const MIN_FREE_CHUNK_SIZE: usize = core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
-const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
+pub const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
+pub const USIZE_SIZE: usize = core::mem::size_of::<usize>();
+pub const MIN_ALIGNMENT: usize = USIZE_ALIGNMENT;
+pub const MIN_FREE_CHUNK_SIZE: usize = core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
+pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 
 /// Chunk size must be divible by 4, even if `MIN_ALIGNMENT` is smaller than
 /// 4, but if `MIN_ALIGNMENT` is bigger than 4 then size must be a multiple of
@@ -18,32 +26,101 @@ pub struct Allocator {
     free_chunk: Option<FreeChunkPtr>,
 }
 impl Allocator {
-    fn alloc(&mut self, layout: core::alloc::Layout) -> *mut u8 {
-        let layout_size = unsafe {
-            align_up(
-                core::cmp::max(layout.size(), 2 * USIZE_SIZE),
-                CHUNK_SIZE_ALIGNMENT,
-            )
-        };
+    /// Creates an empty heap allocator without any heap memory region, which will
+    /// always return null on allocation requests.
+    ///
+    /// To intiialize this allocator, use the `init` method.
+    pub const fn empty() -> Self {
+        Self {
+            heap_region: HeapRegion {
+                heap_start_addr: 0,
+                heap_end_addr: 0,
+            },
+            free_chunk: None,
+        }
+    }
+
+    /// Checks if the heap memory region was already initialized by calling `init`.
+    pub fn was_initialized(&self) -> bool {
+        !(self.heap_region.heap_start_addr == 0 && self.heap_region.heap_end_addr == 0)
+    }
+
+    /// Initializes the heap allocator with the given memory region.
+    ///
+    /// # Safety
+    ///
+    /// If the allocator was already initialized, this function will panic.
+    ///
+    /// The `Allocator` on which this was called must not be moved, and its address
+    /// in memory must not change, otherwise undefined behaviour will occur.
+    /// This is because the heap region now contains pointers to fields of this struct,
+    /// and if this struct will move, the address of its fields will change, and those
+    /// pointers will now be invalid.
+    ///
+    /// The provided memory region must be valid and non-null, and must not be
+    /// used by anything else.
+    ///
+    /// If after aligning the start and end addresses, the size of the heap is 0,
+    /// the function panics.
+    pub unsafe fn init(&mut self, heap_start_addr: usize, heap_size: usize) {
+        let aligned_heap_start_addr = align_up(heap_start_addr, MIN_ALIGNMENT);
+        let heap_end_addr = heap_start_addr + heap_size;
+        let aligned_heap_end_addr = align_down(heap_end_addr, MIN_ALIGNMENT);
+        let aligned_size = aligned_heap_end_addr.saturating_sub(aligned_heap_start_addr);
+
+        // if after aligning the start and end addresses, the heap size is 0
+        if aligned_size == 0 {
+            panic!("heap size is 0 after aligning heap start and end addresses");
+        }
+
+        // create a free chunk for the entire heap.
+        // no need to update the next chunk because there is no next chunk, this chunk covers
+        // the entire heap.
+        let _ = FreeChunk::create_new_without_updating_next_chunk(
+            aligned_heap_start_addr,
+            aligned_size - HEADER_SIZE,
+            None,
+            &mut self.free_chunk,
+        );
+
+        // update the heap region.
+        self.heap_region = HeapRegion {
+            heap_start_addr: aligned_heap_start_addr,
+            heap_end_addr: aligned_heap_end_addr,
+        }
+    }
+
+    /// Allocates memory.
+    pub unsafe fn alloc(&mut self, layout: core::alloc::Layout) -> *mut u8 {
+        let layout_size = align_up(
+            core::cmp::max(layout.size(), 2 * USIZE_SIZE),
+            CHUNK_SIZE_ALIGNMENT,
+        );
         let layout_align = core::cmp::max(layout.align(), MIN_ALIGNMENT);
 
-        let cur_chunk_ref_from_back = &mut self.free_chunk;
-        while let Some(cur_chunk_ptr) = cur_chunk_ref_from_back {
-            let cur_chunk = unsafe { cur_chunk_ptr.as_mut() };
-            if unsafe { is_aligned(cur_chunk.header.content_addr(), layout_align) } {
+        let mut maybe_cur_chunk_ptr = self.free_chunk;
+        while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
+            let cur_chunk = cur_chunk_ptr.as_mut();
+            if is_aligned(cur_chunk.content_addr(), layout_align) {
                 // already aligned
-                if let Some(ptr) = self.heap_region.alloc_aligned(layout_size, cur_chunk) {
+                if let Some(ptr) = self
+                    .heap_region
+                    .alloc_aligned(layout_size, cur_chunk_ptr.as_mut())
+                {
                     return ptr.as_ptr();
                 }
             } else {
                 // the chunk is not aligned
-                if let Some(ptr) =
-                    self.heap_region
-                        .alloc_unaligned(layout_size, layout_align, cur_chunk)
-                {
+                if let Some(ptr) = self.heap_region.alloc_unaligned(
+                    layout_size,
+                    layout_align,
+                    cur_chunk_ptr.as_mut(),
+                ) {
                     return ptr.as_ptr();
                 }
             }
+
+            maybe_cur_chunk_ptr = cur_chunk.fd();
         }
 
         core::ptr::null_mut()
@@ -69,7 +146,7 @@ impl HeapRegion {
         // returned to the user.
         let aligned_content_start_addr = unsafe {
             align_up(
-                cur_chunk.header.addr() + MIN_FREE_CHUNK_SIZE + HEADER_SIZE,
+                cur_chunk.addr() + MIN_FREE_CHUNK_SIZE + HEADER_SIZE,
                 layout_align,
             )
         };
@@ -77,7 +154,6 @@ impl HeapRegion {
 
         // calculate the size left from the aligned start addr to the end of the chunk.
         let left_size = cur_chunk
-            .header
             .end_addr()
             .saturating_sub(aligned_content_start_addr);
 
@@ -88,7 +164,7 @@ impl HeapRegion {
 
         // shrink the current chunk to leave some space for the new aligned allocated
         // chunk.
-        let cur_chunk_new_size = aligned_start_addr - cur_chunk.header.content_addr();
+        let cur_chunk_new_size = aligned_start_addr - cur_chunk.content_addr();
         cur_chunk.set_size(cur_chunk_new_size);
 
         Some(self.alloc_unaligned_after_splitting_start_padding(
@@ -171,16 +247,14 @@ impl HeapRegion {
         // third argument is the `prev_in_use` bit of the created chunk. the chunk
         // before the allocated chunk is the start padding chunk, which is not in
         // use, thus the third argument is `false`.
-        let chunk = unsafe {
-            UsedChunk::create_new(
-                allocated_chunk_addr,
-                allocated_chunk_size,
-                false,
-                self.heap_end_addr,
-            )
-        };
+        let chunk = UsedChunk::create_new(
+            allocated_chunk_addr,
+            allocated_chunk_size,
+            false,
+            self.heap_end_addr,
+        );
 
-        unsafe { NonNull::new_unchecked(chunk as *mut _ as *mut u8) }
+        NonNull::new_unchecked(chunk.content_addr() as *mut _)
     }
 
     /// Allocates an unaligned chunk after splitting its start padding, and
@@ -217,8 +291,8 @@ impl HeapRegion {
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             allocated_chunk_end_addr,
             end_padding,
-            start_padding_chunk.fd,
-            &mut start_padding_chunk.fd,
+            start_padding_chunk.fd(),
+            start_padding_chunk.fd_ref_mut(),
         );
 
         // now create a used chunk for the allocated chunk.
@@ -235,7 +309,7 @@ impl HeapRegion {
             false,
         );
 
-        NonNull::new_unchecked(allocated_chunk as *mut _ as *mut u8)
+        NonNull::new_unchecked(allocated_chunk.content_addr() as *mut _)
     }
 
     /// Allocates a chunk that is already aligned to the desired alignment of
@@ -245,7 +319,8 @@ impl HeapRegion {
         layout_size: usize,
         cur_chunk: FreeChunkRef,
     ) -> Option<NonNull<u8>> {
-        let cur_chunk_size = cur_chunk.header.size();
+        let cur_chunk_size = cur_chunk.size();
+
         // first make sure that the chunk is big enough to hold the allocation.
         if cur_chunk_size < layout_size {
             return None;
@@ -283,7 +358,7 @@ impl HeapRegion {
         cur_chunk.mark_as_used_unlink(self.heap_end_addr);
 
         // retrun the chunk to the user
-        unsafe { NonNull::new_unchecked(cur_chunk as *mut _ as *mut u8) }
+        unsafe { NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8) }
     }
 
     /// Allocates the given aligned chunk and splits an end padding chunk from
@@ -300,7 +375,7 @@ impl HeapRegion {
     ) -> NonNull<u8> {
         // the end address of the allocated chunk that will be returned to the user.
         // this is also the start address of the end padding chunk.
-        let allocated_chunk_end_addr = cur_chunk.header.content_addr() + layout_size;
+        let allocated_chunk_end_addr = cur_chunk.content_addr() + layout_size;
 
         // create a free chunk for the end padding.
         // this will also unlink `cur_chunk` from the linked list and put the end
@@ -311,8 +386,8 @@ impl HeapRegion {
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             allocated_chunk_end_addr,
             end_padding,
-            cur_chunk.fd,
-            cur_chunk.ptr_to_fd_of_bk,
+            cur_chunk.fd(),
+            cur_chunk.ptr_to_fd_of_bk(),
         );
 
         // this is safe because we already removed `cur_chunk` from the freelist, so
@@ -320,419 +395,81 @@ impl HeapRegion {
         cur_chunk.mark_as_used_without_updating_freelist(self.heap_end_addr);
 
         // return a pointer to the allocated chunk
-        NonNull::new_unchecked(cur_chunk as *mut _ as *mut u8)
+        NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8)
     }
 }
 
-#[repr(transparent)]
-pub struct Chunk(DivisbleBy4Usize);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::alloc::Layout;
 
-#[repr(transparent)]
-pub struct UsedChunk(Chunk);
+    static mut ALLOCATOR: Allocator = Allocator::empty();
 
-#[repr(C)]
-pub struct FreeChunk {
-    header: Chunk,
-    fd: Option<FreeChunkPtr>,
-
-    /// A pointer to the `fd` field of the back chunk.
-    ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-}
-
-pub type FreeChunkRef = &'static mut FreeChunk;
-pub type FreeChunkPtr = NonNull<FreeChunk>;
-pub type UsedChunkRef = &'static mut UsedChunk;
-
-pub enum ChunkRef {
-    Used(UsedChunkRef),
-    Free(FreeChunkRef),
-}
-
-impl Chunk {
-    /// Returns a [`ChunkRef`] for the chunk pointed to by the given pointer.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must point to a valid chunk.
-    pub unsafe fn from_addr(addr: usize) -> ChunkRef {
-        let chunk = &mut *(addr as *mut Chunk);
-        if chunk.is_free() {
-            ChunkRef::Free(core::mem::transmute(chunk))
-        } else {
-            ChunkRef::Used(core::mem::transmute(chunk))
-        }
-    }
-
-    /// Sets the `prev_in_use` flag of the chunk at the given address to the
-    /// given value.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must point to a valid chunk.
-    pub unsafe fn set_prev_in_use_for_chunk_with_addr(addr: usize, prev_in_use: bool) {
-        let chunk = &mut *(addr as *mut Chunk);
-        chunk.set_prev_in_use(prev_in_use)
-    }
-
-    /// Creates a new chunk header, if the size is divisible by 4.
-    fn new(size: usize, is_free: bool, prev_in_use: bool) -> Option<Self> {
-        DivisbleBy4Usize::new(size, is_free, prev_in_use).map(Self)
-    }
-
-    /// Creates a new chunk header.
-    ///
-    /// # Safety
-    ///
-    /// `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    unsafe fn new_unchecked(size: usize, is_free: bool, prev_in_use: bool) -> Self {
-        Self(DivisbleBy4Usize::new_unchecked(size, is_free, prev_in_use))
-    }
-
-    /// The size of the chunk.
-    fn size(&self) -> usize {
-        self.0.value()
-    }
-
-    /// Sets the size of the chunk to the given value. The size must be aligned
-    /// to `CHUNK_SIZE_ALIGNMENT`.
-    ///
-    /// # Safety
-    ///
-    /// Panics if the new size is not divisble by 4.
-    fn set_size(&mut self, new_size: usize) {
-        self.0.set_value(new_size);
-    }
-
-    /// Is this chunk free?
-    fn is_free(&self) -> bool {
-        self.0.additional_bit1()
-    }
-
-    /// Sets whether this chunk is considered free or not.
-    fn set_is_free(&mut self, is_free: bool) {
-        self.0.set_additional_bit1(is_free)
-    }
-
-    /// Is the previous chunk free?
-    fn prev_in_use(&self) -> bool {
-        self.0.additional_bit2()
-    }
-
-    /// Sets whether the previous chunk is considered free or not.
-    fn set_prev_in_use(&mut self, prev_in_use: bool) {
-        self.0.set_additional_bit2(prev_in_use)
-    }
-
-    /// The address where this chunk starts.
-    fn addr(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    /// The address where the content of this chunk starts.
-    fn content_addr(&self) -> usize {
-        self as *const _ as usize + HEADER_SIZE
-    }
-
-    /// The address where this chunk ends.
-    fn end_addr(&self) -> usize {
-        self as *const _ as usize + self.size()
-    }
-
-    /// Checks if this chunk is the last chunk.
-    fn is_last_chunk(&self, heap_end_addr: usize) -> bool {
-        self.end_addr() == heap_end_addr
-    }
-
-    /// Returns the address of the next chunk in memory, if the current chunk is
-    /// not the last chunk.
-    fn next_chunk_addr(&self, heap_end_addr: usize) -> Option<usize> {
-        let end = self.end_addr();
-        if end == heap_end_addr {
-            return None;
-        }
-        Some(end)
-    }
-}
-
-impl UsedChunk {
-    /// Returns a [`UsedChunkRef`] for the chunk pointed to by the given
-    /// pointer.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must point to a valid chunk that is used.
-    pub unsafe fn from_addr(addr: usize) -> UsedChunkRef {
-        &mut *(addr as *mut UsedChunk)
-    }
-
-    /// Creates a new used chunk at the given address, with the given size.
-    ///
-    /// # Safety
-    ///
-    ///  - `addr` must be a valid non-null memory address which is not used by
-    ///    any other chunk.
-    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    ///  - The chunk's next chunk, if any, must be updated that its previous
-    ///    chunk is now in use.
-    pub unsafe fn create_new_without_updating_next_chunk(
+    /// A guard that initializes the allocator with a region of memory on creation,
+    /// and frees that memory when dropped.
+    struct AllocatorInitGuard<const MEM_SIZE: usize> {
         addr: usize,
-        size: usize,
-        prev_in_use: bool,
-    ) -> UsedChunkRef {
-        let ptr = addr as *mut UsedChunk;
-
-        // write the chunk header and content
-        *ptr = UsedChunk(Chunk::new_unchecked(size, false, prev_in_use));
-
-        &mut *ptr
     }
-
-    /// Creates a new used chunk at the given address, with the given size, and
-    /// updates its next chunk, if any, that its prev chunk is now used.
-    ///
-    /// # Safety
-    ///
-    ///  - `addr` must be a valid non-null memory address which is not used by
-    ///    any other chunk.
-    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    pub unsafe fn create_new(
-        addr: usize,
-        size: usize,
-        prev_in_use: bool,
-        heap_end_addr: usize,
-    ) -> UsedChunkRef {
-        // create a new used chunk
-        let chunk = UsedChunk::create_new_without_updating_next_chunk(addr, size, prev_in_use);
-
-        // update the next chunk
-        if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(heap_end_addr) {
-            Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, true)
+    impl<const MEM_SIZE: usize> AllocatorInitGuard<MEM_SIZE> {
+        /// Initializes the heap allocator and returns a guard for it.
+        fn init() -> Self {
+            let mem_box = Box::new([0u8; MEM_SIZE]);
+            let mem = Box::leak(mem_box);
+            let addr = mem as *mut _ as usize;
+            unsafe { ALLOCATOR.init(addr, MEM_SIZE) }
+            Self { addr }
         }
 
-        // return the created chunk
-        chunk
-    }
-}
-
-impl FreeChunk {
-    /// Returns a [`FreeChunkRef`] for the chunk pointed to by the given
-    /// pointer.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must point to a valid chunk that is free.
-    pub unsafe fn from_addr(addr: usize) -> FreeChunkRef {
-        &mut *(addr as *mut FreeChunk)
-    }
-
-    /// Returns a mutable reference to the fd chunk.
-    pub fn fd(&mut self) -> Option<FreeChunkRef> {
-        self.fd.map(|mut fd| unsafe { fd.as_mut() })
-    }
-
-    /// Returns a mutable reference to this chunk's postfix size.
-    pub fn postfix_size(&mut self) -> &mut usize {
-        let postfix_size_ptr = (self.header.end_addr() - USIZE_SIZE) as *mut usize;
-        unsafe { &mut *postfix_size_ptr }
-    }
-
-    /// Sets the size of this free chunk and updates the postfix size.
-    pub fn set_size(&mut self, new_size: usize) {
-        self.header.set_size(new_size);
-        *self.postfix_size() = new_size;
-    }
-
-    /// Marks this free chunk as used and updates its next chunk, but without
-    /// updating the linked list of free chunks.
-    ///
-    /// # Safety
-    ///
-    /// You must make sure to remove this chunk from the linked list of free
-    /// chunks, since it is now used.
-    pub unsafe fn mark_as_used_without_updating_freelist(&mut self, heap_end_addr: usize) {
-        // mark as used
-        self.header.set_is_free(false);
-
-        // update next chunk, if there is one
-        if let Some(next_chunk_addr) = self.header.next_chunk_addr(heap_end_addr) {
-            let next_chunk = unsafe { UsedChunk::from_addr(next_chunk_addr) };
-            next_chunk.0.set_prev_in_use(true);
+        /// Returns the address of the allocated heap memory region.
+        fn addr(&self) -> usize {
+            self.addr
         }
     }
 
-    /// Marks this free chunk as used, updates its next chunk, and unlinks this
-    /// chunk from the linked list of free chunks.
-    pub fn mark_as_used_unlink(&mut self, heap_end_addr: usize) -> UsedChunkRef {
-        // this is safe because we then unlink it.
-        unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) }
+    #[test]
+    fn alloc_not_enough_space_returns_null() {
+        const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-        // unlink this chunk from the linked list of free chunks, to do that we
-        // need to change the state:
-        // ```
-        // bk <-> self <-> fd
-        // ```
-        // to the state:
-        // ```
-        // bk <-> fd
-        // ```
+        let _guard = AllocatorInitGuard::<MEM_SIZE>::init();
 
-        // make bk point to fd
-        unsafe { *self.ptr_to_fd_of_bk = self.fd };
+        // calculate the allocation size that will fit perfectly
+        let perfect_fit = MEM_SIZE - HEADER_SIZE;
 
-        // make fd point back to bk
-        if let Some(fd) = self.fd() {
-            fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
-        }
+        // add 1 to make an allocation size that will not fit.
+        let no_fit = perfect_fit + 1;
 
-        unsafe { core::mem::transmute(self) }
+        let allocated = unsafe { ALLOCATOR.alloc(Layout::from_size_align(no_fit, 1).unwrap()) };
+
+        assert!(allocated.is_null())
     }
 
-    /// Creates a new free chunk at the given address, with the given size.
-    ///
-    /// The new chunk will be marked as free, and its `prev_in_use` flag will be
-    /// set to `true`, because no 2 free chunks can be adjacent.
-    ///
-    /// The new chunk will also be linked into the linked list between fd and
-    /// bk.
-    ///
-    /// # Safety
-    ///
-    ///  - `addr` must be a valid non-null memory address which is not used by
-    ///    any other chunk.
-    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    ///  - The chunk's next chunk, if any, must be updated that its previous
-    ///    chunk is now free.
-    pub unsafe fn create_new_without_updating_next_chunk(
-        addr: usize,
-        size: usize,
-        fd: Option<FreeChunkPtr>,
-        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-    ) -> FreeChunkPtr {
-        let created_chunk_ref = FreeChunk::from_addr(addr);
+    #[test]
+    fn alloc_perfect_fit() {
+        const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-        // write the chunk header and content
-        *created_chunk_ref = FreeChunk {
-            // last argument is the `prev_in_use` flag, and there are no 2 adjacent free chunks, so
-            // the previous chunk is surely unused, thus last argument is `false`.
-            header: Chunk::new_unchecked(size, true, false),
-            fd,
-            ptr_to_fd_of_bk,
+        let guard = AllocatorInitGuard::<MEM_SIZE>::init();
+        let addr = guard.addr();
+
+        // calculate the allocation size that will fit perfectly
+        let perfect_fit = MEM_SIZE - HEADER_SIZE;
+
+        let allocated =
+            unsafe { ALLOCATOR.alloc(Layout::from_size_align(perfect_fit, 1).unwrap()) };
+
+        // make sure it points to where it should
+        assert_eq!(allocated as usize, addr + HEADER_SIZE);
+
+        // make sure that the chunk header is correct.
+        let chunk_header = unsafe {
+            match Chunk::from_addr(addr) {
+                ChunkRef::Used(used) => used,
+                ChunkRef::Free(_) => panic!("allocated chunk is marked as free"),
+            }
         };
 
-        // write the postfix size at the end of the chunk
-        *created_chunk_ref.postfix_size() = size;
-
-        // update the freelist.
-        //
-        // make `fd` point back to this chunk
-        if let Some(mut fd) = fd {
-            let fd_ref = fd.as_mut();
-            fd_ref.ptr_to_fd_of_bk = &mut created_chunk_ref.fd;
-        }
-        // make `bk` point to this chunk
-        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(addr as *mut _));
-
-        FreeChunkPtr::new_unchecked(addr as *mut _)
+        // the prev in use of the first chunk in the heap should be `true`.
+        assert_eq!(chunk_header.0.prev_in_use(), true);
+        assert_eq!(chunk_header.0.size(), perfect_fit);
     }
-}
-
-/// A usize that is guaranteed to be divisible by 4, which allows storing 2
-/// additional bits of information in it.
-#[repr(transparent)]
-struct DivisbleBy4Usize(usize);
-
-impl DivisbleBy4Usize {
-    /// Creates divisble by 4 usize if the given value is divisble by 4, and
-    /// stores the given additional bits in it.
-    pub fn new(n: usize, additional_bit1: bool, additional_bit2: bool) -> Option<Self> {
-        if n & 0b11 != 0 {
-            return None;
-        }
-        unsafe {
-            // SAFETY: we just checked that this is safe
-            Some(Self::new_unchecked(n, additional_bit1, additional_bit2))
-        }
-    }
-
-    /// Creates a divisible by 4 usize without checking if the given value is
-    /// divisible by 4, and stores the given additional bits in it.
-    /// This results in undefined behaviour if the value is not divisible by 4.
-    pub unsafe fn new_unchecked(n: usize, additional_bit1: bool, additional_bit2: bool) -> Self {
-        Self(n | usize::from(additional_bit1) | usize::from(additional_bit2) << 1)
-    }
-
-    /// Returns the divisble by 4 value as a `usize`.
-    pub fn value(&self) -> usize {
-        self.0 & (!1)
-    }
-
-    /// Returns the first additional bit of information stored within the
-    /// number.
-    pub fn additional_bit1(&self) -> bool {
-        self.0 & 1 != 0
-    }
-
-    /// Returns the second additional bit of information stored within the
-    /// number.
-    pub fn additional_bit2(&self) -> bool {
-        (self.0 >> 1) & 1 != 0
-    }
-
-    /// Sets the value of this divisble by 4 usize to the given value, without
-    /// changing the additional bits stored within the number.
-    ///
-    /// # Safety
-    ///
-    /// The new value must be divisble by 4, otherwise the function panics.
-    pub fn set_value(&mut self, new_value: usize) {
-        if new_value & 0b11 != 0 {
-            panic!("the value of a divisible by 4 usize must be divisble by 4");
-        }
-        self.0 = new_value | self.0 & 0b11;
-    }
-
-    /// Sets the first additional bit of information atores within the number.
-    pub fn set_additional_bit1(&mut self, new_value: bool) {
-        self.0 = (self.0 | 1) & usize::from(new_value)
-    }
-
-    /// Sets the second additional bit of information atores within the number.
-    pub fn set_additional_bit2(&mut self, new_value: bool) {
-        self.0 = (self.0 | 0b10) & (usize::from(new_value) << 1)
-    }
-}
-
-/// Align downwards. Returns the greatest x with alignment `align`
-/// so that x <= addr.
-///
-/// # Safety
-///
-/// `align` must be a power of 2.
-pub unsafe fn align_down(n: usize, align: usize) -> usize {
-    if align.is_power_of_two() {
-        n & !(align - 1)
-    } else if align == 0 {
-        n
-    } else {
-        panic!("`align` must be a power of 2");
-    }
-}
-
-/// Align upwards. Returns the smallest x with alignment `align`
-/// so that x >= addr.
-///
-/// # Safety
-///
-/// `align` must be a power of 2.
-pub unsafe fn align_up(n: usize, align: usize) -> usize {
-    align_down(n + align - 1, align)
-}
-
-/// Checks if the given value is aligned to the given alignment.
-///
-/// # Safety
-///
-/// `align` must be a power of 2.
-pub unsafe fn is_aligned(n: usize, align: usize) -> bool {
-    n & (align - 1) == 0
 }
