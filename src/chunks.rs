@@ -93,7 +93,7 @@ impl Chunk {
 
     /// The address where this chunk ends.
     pub fn end_addr(&self) -> usize {
-        self as *const _ as usize + self.size()
+        self.content_addr() + self.size()
     }
 
     /// Checks if this chunk is the last chunk.
@@ -114,7 +114,7 @@ impl Chunk {
 
 /// A used chunk in the heap.
 #[repr(transparent)]
-pub struct UsedChunk(pub Chunk);
+pub struct UsedChunk(pub(crate) Chunk);
 
 pub type UsedChunkRef = &'static mut UsedChunk;
 
@@ -181,16 +181,27 @@ impl UsedChunk {
         // return the created chunk
         chunk
     }
+
+    /// The size of the previous chunk, if it is free.
+    pub fn prev_size_if_free(&self) -> Option<usize> {
+        if self.0.prev_in_use() {
+            return None;
+        }
+
+        let prev_chunk_postfix_size_ptr = (self.0.addr() - USIZE_SIZE) as *mut usize;
+
+        Some(unsafe { *prev_chunk_postfix_size_ptr })
+    }
 }
 
 /// A free chunk in the heap.
 #[repr(C)]
 pub struct FreeChunk {
-    header: Chunk,
-    fd: Option<FreeChunkPtr>,
+    pub(crate) header: Chunk,
+    pub(crate) fd: Option<FreeChunkPtr>,
 
     /// A pointer to the `fd` field of the back chunk.
-    ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+    pub(crate) ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
 }
 
 pub type FreeChunkRef = &'static mut FreeChunk;
