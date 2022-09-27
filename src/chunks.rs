@@ -192,6 +192,16 @@ impl UsedChunk {
 
         Some(unsafe { *prev_chunk_postfix_size_ptr })
     }
+
+    /// Sets the size of this used chunk to the given value. The size must be
+    /// aligned to `CHUNK_SIZE_ALIGNMENT`.
+    ///
+    /// # Safety
+    ///
+    /// Panics if the new size is not divisble by 4.
+    pub fn set_size(&mut self, new_size: usize) {
+        self.0.set_size(new_size)
+    }
 }
 
 /// A free chunk in the heap.
@@ -277,7 +287,10 @@ impl FreeChunk {
     ///
     /// You must make sure to remove this chunk from the linked list of free
     /// chunks, since it is now used.
-    pub unsafe fn mark_as_used_without_updating_freelist(&mut self, heap_end_addr: usize) {
+    pub unsafe fn mark_as_used_without_updating_freelist(
+        &mut self,
+        heap_end_addr: usize,
+    ) -> UsedChunkRef {
         // mark as used
         self.header.set_is_free(false);
 
@@ -286,13 +299,15 @@ impl FreeChunk {
             let next_chunk = unsafe { UsedChunk::from_addr(next_chunk_addr) };
             next_chunk.0.set_prev_in_use(true);
         }
+
+        core::mem::transmute(self)
     }
 
     /// Marks this free chunk as used, updates its next chunk, and unlinks this
     /// chunk from the linked list of free chunks.
     pub fn mark_as_used_unlink(&mut self, heap_end_addr: usize) -> UsedChunkRef {
         // this is safe because we then unlink it.
-        unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) }
+        let _ = unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) };
 
         // unlink this chunk from the linked list of free chunks, to do that we
         // need to change the state:
