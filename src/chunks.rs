@@ -193,6 +193,18 @@ impl UsedChunk {
         Some(unsafe { *prev_chunk_postfix_size_ptr })
     }
 
+    /// Returns a refernece to the previous chunk, if it is free.
+    pub fn prev_chunk_if_free(&self) -> Option<FreeChunkRef> {
+        let prev_size = self.prev_size_if_free()?;
+        Some(unsafe { FreeChunk::from_addr(self.0.addr() - prev_size - HEADER_SIZE) })
+    }
+
+    /// Returns a refernece to the next chunk, if it is free.
+    pub fn next_chunk_if_free(&self, heap_end_addr: usize) -> Option<FreeChunkRef> {
+        let next_chunk_addr = self.0.next_chunk_addr(heap_end_addr)?;
+        Some(unsafe { FreeChunk::from_addr(next_chunk_addr) })
+    }
+
     /// Sets the size of this used chunk to the given value. The size must be
     /// aligned to `CHUNK_SIZE_ALIGNMENT`.
     ///
@@ -201,6 +213,44 @@ impl UsedChunk {
     /// Panics if the new size is not divisble by 4.
     pub fn set_size(&mut self, new_size: usize) {
         self.0.set_size(new_size)
+    }
+
+    /// Marks this chunk as free, updates the next chunk, and inserts this chunk
+    /// into the linked list between fd and bk.
+    pub fn mark_as_free(
+        &mut self,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+        heap_end_addr: usize,
+    ) -> FreeChunkRef {
+        self.0.set_is_free(true);
+
+        let as_free_chunk = unsafe { FreeChunk::from_addr(self.0.addr()) };
+
+        as_free_chunk.fd = fd;
+        as_free_chunk.ptr_to_fd_of_bk = ptr_to_fd_of_bk;
+
+        // write the postfix size at the end of the chunk
+        *as_free_chunk.postfix_size() = as_free_chunk.size();
+
+        // update the freelist.
+        //
+        // make `fd` point back to this chunk
+        if let Some(mut fd) = fd {
+            let fd_ref = unsafe { fd.as_mut() };
+            fd_ref.ptr_to_fd_of_bk = &mut as_free_chunk.fd;
+        }
+        // make `bk` point to this chunk
+        unsafe {
+            *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _))
+        }
+
+        // update the next chunk.
+        if let Some(next_chunk_addr) = as_free_chunk.header.next_chunk_addr(heap_end_addr) {
+            unsafe { Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false) };
+        }
+
+        as_free_chunk
     }
 }
 
