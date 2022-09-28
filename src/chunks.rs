@@ -202,7 +202,10 @@ impl UsedChunk {
     /// Returns a refernece to the next chunk, if it is free.
     pub fn next_chunk_if_free(&self, heap_end_addr: usize) -> Option<FreeChunkRef> {
         let next_chunk_addr = self.0.next_chunk_addr(heap_end_addr)?;
-        Some(unsafe { FreeChunk::from_addr(next_chunk_addr) })
+        match unsafe { Chunk::from_addr(next_chunk_addr) } {
+            ChunkRef::Used(_) => None,
+            ChunkRef::Free(free) => Some(free),
+        }
     }
 
     /// Sets the size of this used chunk to the given value. The size must be

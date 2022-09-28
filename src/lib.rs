@@ -3,13 +3,12 @@ mod chunks;
 mod divisible_by_4_usize;
 
 #[cfg(test)]
-mod alloc_tests;
+mod tests;
 
-use core::{pin::Pin, ptr::NonNull};
+use core::{alloc::Layout, ptr::NonNull};
 
 use alignment::*;
 use chunks::*;
-use divisible_by_4_usize::*;
 
 pub const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
 pub const USIZE_SIZE: usize = core::mem::size_of::<usize>();
@@ -22,6 +21,7 @@ pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 /// it.
 const CHUNK_SIZE_ALIGNMENT: usize = if MIN_ALIGNMENT < 4 { 4 } else { MIN_ALIGNMENT };
 
+/// A linked list memory allocator.
 pub struct Allocator {
     heap_region: HeapRegion,
     free_chunk: Option<FreeChunkPtr>,
@@ -133,7 +133,7 @@ impl Allocator {
     }
 
     /// Deallocates memory.
-    pub unsafe fn dealloc(&mut self, ptr: *mut u8, layout: core::alloc::Layout) {
+    pub unsafe fn dealloc(&mut self, ptr: *mut u8) {
         let chunk = UsedChunk::from_addr(ptr as usize - HEADER_SIZE);
         match (
             chunk.prev_chunk_if_free(),
@@ -487,5 +487,56 @@ impl HeapRegion {
 
         // return a pointer to the allocated chunk
         NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8)
+    }
+}
+
+unsafe impl Send for Allocator {}
+
+/// A spin locked memory allocator that can be used as the global allocator.
+#[cfg(feature = "spin")]
+pub struct SpinLockedAllocator(spin::Mutex<Allocator>);
+
+#[cfg(feature = "spin")]
+impl SpinLockedAllocator {
+    /// Creates an empty locked heap allocator without any heap memory region, which
+    /// will always return null on allocation requests.
+    ///
+    /// To intiialize this allocator, use the `init` method.
+    pub const fn empty() -> Self {
+        Self(spin::Mutex::new(Allocator::empty()))
+    }
+
+    /// Initializes the heap allocator with the given memory region.
+    ///
+    /// # Safety
+    ///
+    /// If the allocator was already initialized, this function will panic.
+    ///
+    /// The `SpinLockedAllocator` on which this was called must not be moved, and its
+    /// address in memory must not change, otherwise undefined behaviour
+    /// will occur. This is because the heap region now contains pointers to
+    /// fields of this struct, and if this struct will move, the address of
+    /// its fields will change, and those pointers will now be invalid.
+    ///
+    /// The provided memory region must be valid and non-null, and must not be
+    /// used by anything else.
+    ///
+    /// If after aligning the start and end addresses, the size of the heap is
+    /// 0, the function panics.
+    pub unsafe fn init(&self, heap_start_addr: usize, heap_size: usize) {
+        let mut allocator = self.0.lock();
+        allocator.init(heap_start_addr, heap_size);
+    }
+}
+
+#[cfg(feature = "spin")]
+unsafe impl core::alloc::GlobalAlloc for SpinLockedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let mut allocator = self.0.lock();
+        allocator.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        let mut allocator = self.0.lock();
+        allocator.dealloc(ptr)
     }
 }
