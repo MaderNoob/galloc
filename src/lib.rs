@@ -140,15 +140,75 @@ impl Allocator {
             chunk.next_chunk_if_free(self.heap_region.heap_end_addr),
         ) {
             (None, None) => {
+                // mark the chunk as free, and adds it to the start of the linked list of free chunks.
                 let _ = chunk.mark_as_free(
                     self.free_chunk,
                     &mut self.free_chunk,
                     self.heap_region.heap_end_addr,
                 );
-            },
-            (None, Some(next_chunk_free)) => todo!(),
-            (Some(prev_chunk_free), None) => todo!(),
-            (Some(prev_chunk_free), Some(next_chunk_free)) => todo!(),
+            }
+            (None, Some(next_chunk_free)) => {
+                // for this case, we create a free chunk where the deallocated chunk is,
+                // which will consolidate itself and the next chunk into one big free chunk.
+
+                // first resize the chunk (before marking it as free), so that we won't write
+                // the postfix size twice.
+                //
+                // the chunk should include itself, and the entire next free chunk,
+                // which is made up of its header, and its content.
+                chunk.set_size(chunk.0.size() + HEADER_SIZE + next_chunk_free.size());
+
+                // mark the chunk as free.
+                //
+                // this will also unlink the next chunk and replace it with this deallocated
+                // chunk, in the linked list of free chunks.
+                let _ = chunk.mark_as_free_without_updating_next_chunk(
+                    next_chunk_free.fd,
+                    next_chunk_free.ptr_to_fd_of_bk,
+                    self.heap_region.heap_end_addr,
+                );
+            }
+            (Some(prev_chunk_free), None) => {
+                // for this case, just resize the prev chunk to consolidate it with the current chunk.
+                // in other words, make it large enough so that it includes the entire current chunk,
+                //
+                // which means that it should include itself, the current chunk's header, and the
+                // current chunk's content.
+                prev_chunk_free.set_size(prev_chunk_free.size() + HEADER_SIZE + chunk.0.size());
+
+                // we must also update the prev in use bit of the next chunk, if any, because its
+                // prev is now free.
+                if let Some(next_chunk_addr) =
+                    chunk.0.next_chunk_addr(self.heap_region.heap_end_addr)
+                {
+                    Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
+                }
+            }
+            (Some(prev_chunk_free), Some(next_chunk_free)) => {
+                // for this case, we want to make the prev chunk large enough to include both this
+                // and the next chunk.
+                //
+                // we must also make sure to unlink the next chunk since it's now part of another
+                // chunk.
+
+                // SAFETY: this is safe because this chunk will now be incorporated in the prev chunk,
+                // so no memory is lost.
+                next_chunk_free.unlink();
+
+                // the prev chunk will now include the following:
+                // - itself
+                // - the current chunk's header
+                // - the current chunk's content
+                // - the next chunk's header
+                // - the next chunk's content
+                prev_chunk_free.set_size(
+                    prev_chunk_free.size()
+                        + HEADER_SIZE
+                        + chunk.0.size()
+                        + HEADER_SIZE
+                        + next_chunk_free.size(),
+                );
+            }
         }
     }
 }

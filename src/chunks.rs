@@ -215,9 +215,13 @@ impl UsedChunk {
         self.0.set_size(new_size)
     }
 
-    /// Marks this chunk as free, updates the next chunk, and inserts this chunk
-    /// into the linked list between fd and bk.
-    pub fn mark_as_free(
+    /// Marks this chunk as free, and inserts this chunk into the linked list between fd and bk.
+    ///
+    /// # Safety
+    ///
+    /// This function doesn't update the next chunk that this chunk is now free, you must make
+    /// sure that the next chunk's prev in use flag is correct.
+    pub unsafe fn mark_as_free_without_updating_next_chunk(
         &mut self,
         fd: Option<FreeChunkPtr>,
         ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
@@ -244,6 +248,22 @@ impl UsedChunk {
         unsafe {
             *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _))
         }
+
+        as_free_chunk
+    }
+
+    /// Marks this chunk as free, updates the next chunk, and inserts this chunk
+    /// into the linked list between fd and bk.
+    pub fn mark_as_free(
+        &mut self,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+        heap_end_addr: usize,
+    ) -> FreeChunkRef {
+        // SAFETY: we update the next chunk right after calling this.
+        let as_free_chunk = unsafe {
+            self.mark_as_free_without_updating_next_chunk(fd, ptr_to_fd_of_bk, heap_end_addr)
+        };
 
         // update the next chunk.
         if let Some(next_chunk_addr) = as_free_chunk.header.next_chunk_addr(heap_end_addr) {
@@ -346,7 +366,7 @@ impl FreeChunk {
 
         // update next chunk, if there is one
         if let Some(next_chunk_addr) = self.header.next_chunk_addr(heap_end_addr) {
-            let next_chunk = unsafe { UsedChunk::from_addr(next_chunk_addr) };
+            let next_chunk = UsedChunk::from_addr(next_chunk_addr);
             next_chunk.0.set_prev_in_use(true);
         }
 
@@ -359,23 +379,8 @@ impl FreeChunk {
         // this is safe because we then unlink it.
         let _ = unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) };
 
-        // unlink this chunk from the linked list of free chunks, to do that we
-        // need to change the state:
-        // ```
-        // bk <-> self <-> fd
-        // ```
-        // to the state:
-        // ```
-        // bk <-> fd
-        // ```
-
-        // make bk point to fd
-        unsafe { *self.ptr_to_fd_of_bk = self.fd };
-
-        // make fd point back to bk
-        if let Some(fd) = self.fd_chunk_ref() {
-            fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
-        }
+        // this is safe because the chunk will now be used.
+        unsafe { self.unlink() };
 
         unsafe { core::mem::transmute(self) }
     }
@@ -426,6 +431,32 @@ impl FreeChunk {
         *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(addr as *mut _));
 
         FreeChunkPtr::new_unchecked(addr as *mut _)
+    }
+
+    /// Unlinks this chunk from the linked list of free chunks.
+    ///
+    /// # Safety
+    ///
+    /// You must make sure to make use of this chunk and keep track of it, do not lose
+    /// the memory.
+    pub unsafe fn unlink(&mut self) {
+        // unlink this chunk from the linked list of free chunks, to do that we
+        // need to change the state:
+        // ```
+        // bk <-> self <-> fd
+        // ```
+        // to the state:
+        // ```
+        // bk <-> fd
+        // ```
+
+        // make bk point to fd
+        *self.ptr_to_fd_of_bk = self.fd;
+
+        // make fd point back to bk
+        if let Some(fd) = self.fd_chunk_ref() {
+            fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
+        }
     }
 }
 
