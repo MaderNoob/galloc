@@ -14,8 +14,8 @@ fn alloc_no_memory() {
 fn alloc_not_enough_space_returns_null() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     // calculate the allocation size that will fit perfectly
     let perfect_fit = MEM_SIZE - HEADER_SIZE;
@@ -36,8 +36,8 @@ fn alloc_not_enough_space_returns_null() {
 fn alloc_perfect_fit() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     let addr = guard.addr();
 
@@ -70,8 +70,8 @@ fn alloc_perfect_fit() {
 fn alloc_aligned_with_end_padding_not_large_enough_to_fit_chunk() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
     let addr = guard.addr();
 
     // calculate the allocation size that will fit perfectly
@@ -114,15 +114,15 @@ fn alloc_aligned_with_end_padding_not_large_enough_to_fit_chunk() {
 fn alloc_aligned_end_padding() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
     let addr = guard.addr();
 
     // calculate the allocation size that will fit perfectly
     let perfect_fit = MEM_SIZE - HEADER_SIZE;
 
     // a size that will leave end padding that is large enough to fit a free chunk.
-    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE;
+    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER;
 
     let allocated = unsafe {
         guard
@@ -164,7 +164,7 @@ fn alloc_aligned_end_padding() {
     // subtracting `HEADER_SIZE` because `MIN_FREE_CHUNK_SIZE` includes the header.
     assert_eq!(
         end_padding_chunk.header.size(),
-        MIN_FREE_CHUNK_SIZE - HEADER_SIZE
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
     // the end padding chunk is the only free chunk
@@ -177,7 +177,7 @@ fn alloc_aligned_end_padding() {
     // make sure that the end padding size has written its postfix size
     assert_eq!(
         *end_padding_chunk.postfix_size(),
-        MIN_FREE_CHUNK_SIZE - HEADER_SIZE
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
     // make sure that the allocator points to the end padding chunk.
@@ -191,8 +191,8 @@ fn alloc_aligned_end_padding() {
 fn alloc_unaligned_not_enough_space_returns_null() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    let mem_size = guard.init_unaligned();
+    let mut guard = AllocatorInitGuard::empty();
+    let mem_size = guard.init_unaligned(MEM_SIZE);
 
     // an alignment that will cause the chunk to be unaligned.
     let alignment = MIN_ALIGNMENT * 2;
@@ -216,8 +216,8 @@ fn alloc_unaligned_not_enough_space_returns_null() {
 fn alloc_unaligned_no_end_padding() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    let mem_size = guard.init_unaligned();
+    let mut guard = AllocatorInitGuard::empty();
+    let mem_size = guard.init_unaligned(MEM_SIZE);
     let addr = guard.addr();
 
     // choose an alignment that will cause the chunk to be unaligned.
@@ -226,8 +226,12 @@ fn alloc_unaligned_no_end_padding() {
     // calculate the minimal aligned address at which the content can start so that
     // we have enough space for an entire free chunk for the start padding, and for
     // the header of the allocated chunk.
-    let aligned_content_addr =
-        unsafe { align_up(addr + MIN_FREE_CHUNK_SIZE + HEADER_SIZE, alignment) };
+    let aligned_content_addr = unsafe {
+        align_up(
+            addr + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
+            alignment,
+        )
+    };
 
     // find the end of the heap
     let heap_end_addr = addr + mem_size;
@@ -299,8 +303,8 @@ fn alloc_unaligned_no_end_padding() {
 fn alloc_unaligned_end_padding() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    let mem_size = guard.init_unaligned();
+    let mut guard = AllocatorInitGuard::empty();
+    let mem_size = guard.init_unaligned(MEM_SIZE);
     let addr = guard.addr();
 
     // choose an alignment that will cause the chunk to be unaligned.
@@ -309,8 +313,12 @@ fn alloc_unaligned_end_padding() {
     // calculate the minimal aligned address at which the content can start so that
     // we have enough space for an entire free chunk for the start padding, and for
     // the header of the allocated chunk.
-    let aligned_content_addr =
-        unsafe { align_up(addr + MIN_FREE_CHUNK_SIZE + HEADER_SIZE, alignment) };
+    let aligned_content_addr = unsafe {
+        align_up(
+            addr + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
+            alignment,
+        )
+    };
 
     // find the end of the heap
     let heap_end_addr = addr + mem_size;
@@ -319,7 +327,7 @@ fn alloc_unaligned_end_padding() {
     let perfect_fit = heap_end_addr - aligned_content_addr;
 
     // a size that will leave end padding that is large enough to fit a free chunk.
-    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE;
+    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER;
 
     let allocated = unsafe {
         guard
@@ -373,7 +381,7 @@ fn alloc_unaligned_end_padding() {
     // subtracting `HEADER_SIZE` because `MIN_FREE_CHUNK_SIZE` includes the header.
     assert_eq!(
         end_padding_chunk.header.size(),
-        MIN_FREE_CHUNK_SIZE - HEADER_SIZE
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
     // the end padding chunk is the last free chunk
@@ -388,7 +396,7 @@ fn alloc_unaligned_end_padding() {
     // make sure that the end padding size has written its postfix size
     assert_eq!(
         *end_padding_chunk.postfix_size(),
-        MIN_FREE_CHUNK_SIZE - HEADER_SIZE
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
     // make sure that the allocated chunk is correct

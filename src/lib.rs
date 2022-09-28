@@ -13,7 +13,8 @@ use chunks::*;
 pub const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
 pub const USIZE_SIZE: usize = core::mem::size_of::<usize>();
 pub const MIN_ALIGNMENT: usize = USIZE_ALIGNMENT;
-pub const MIN_FREE_CHUNK_SIZE: usize = core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
+pub const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize =
+    core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
 pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 
 /// Chunk size must be divible by 4, even if `MIN_ALIGNMENT` is smaller than
@@ -140,13 +141,14 @@ impl Allocator {
             chunk.next_chunk_if_free(self.heap_region.heap_end_addr),
         ) {
             (None, None) => {
-                // mark the chunk as free, and adds it to the start of the linked list of free chunks.
+                // mark the chunk as free, and adds it to the start of the linked list of free
+                // chunks.
                 let _ = chunk.mark_as_free(
                     self.free_chunk,
                     &mut self.free_chunk,
                     self.heap_region.heap_end_addr,
                 );
-            }
+            },
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -167,32 +169,33 @@ impl Allocator {
                     next_chunk_free.ptr_to_fd_of_bk,
                     self.heap_region.heap_end_addr,
                 );
-            }
+            },
             (Some(prev_chunk_free), None) => {
-                // for this case, just resize the prev chunk to consolidate it with the current chunk.
-                // in other words, make it large enough so that it includes the entire current chunk,
+                // for this case, just resize the prev chunk to consolidate it with the current
+                // chunk. in other words, make it large enough so that it
+                // includes the entire current chunk,
                 //
-                // which means that it should include itself, the current chunk's header, and the
-                // current chunk's content.
+                // which means that it should include itself, the current chunk's header, and
+                // the current chunk's content.
                 prev_chunk_free.set_size(prev_chunk_free.size() + HEADER_SIZE + chunk.0.size());
 
-                // we must also update the prev in use bit of the next chunk, if any, because its
-                // prev is now free.
+                // we must also update the prev in use bit of the next chunk, if any, because
+                // its prev is now free.
                 if let Some(next_chunk_addr) =
                     chunk.0.next_chunk_addr(self.heap_region.heap_end_addr)
                 {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            }
+            },
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
-                // for this case, we want to make the prev chunk large enough to include both this
-                // and the next chunk.
+                // for this case, we want to make the prev chunk large enough to include both
+                // this and the next chunk.
                 //
-                // we must also make sure to unlink the next chunk since it's now part of another
-                // chunk.
+                // we must also make sure to unlink the next chunk since it's now part of
+                // another chunk.
 
-                // SAFETY: this is safe because this chunk will now be incorporated in the prev chunk,
-                // so no memory is lost.
+                // SAFETY: this is safe because this chunk will now be incorporated in the prev
+                // chunk, so no memory is lost.
                 next_chunk_free.unlink();
 
                 // the prev chunk will now include the following:
@@ -208,7 +211,7 @@ impl Allocator {
                         + HEADER_SIZE
                         + next_chunk_free.size(),
                 );
-            }
+            },
         }
     }
 }
@@ -232,7 +235,7 @@ impl HeapRegion {
         // returned to the user.
         let aligned_content_start_addr = unsafe {
             align_up(
-                cur_chunk.addr() + MIN_FREE_CHUNK_SIZE + HEADER_SIZE,
+                cur_chunk.addr() + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
                 layout_align,
             )
         };
@@ -276,7 +279,7 @@ impl HeapRegion {
         let end_padding = allocated_chunk_size - layout_size;
         if end_padding > 0 {
             // check if the end padding is large enough to hold a free chunk
-            if end_padding >= MIN_FREE_CHUNK_SIZE {
+            if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
                 // if the end padding is large enough to hold a free chunk, create a chunk
                 // there.
                 unsafe {
@@ -417,7 +420,7 @@ impl HeapRegion {
         let end_padding = cur_chunk_size - layout_size;
         if end_padding > 0 {
             // check if the end padding is large enough to hold a free chunk
-            if end_padding >= MIN_FREE_CHUNK_SIZE {
+            if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
                 // if the end padding is large enough to hold a free chunk, create a chunk
                 // there.
                 Some(unsafe {
@@ -479,8 +482,15 @@ impl HeapRegion {
 
         // this is safe because we already removed `cur_chunk` from the freelist, so
         // there's no need to update the freelist again.
-        let cur_chunk_as_used =
-            cur_chunk.mark_as_used_without_updating_freelist(self.heap_end_addr);
+        //
+        // also, the next chunk is the end padding chunk, and was just created as a free
+        // chunk, and when creating a free chunk its prev in use bit is
+        // automatically set to true, so no need to update it.
+        //
+        // also please note that if we tried to update the next chunk here it would
+        // update the chunk *after* the end padding chunk and not the end padding chunk
+        // itself, because we haven't yet updated the size of `cur_chunk`.
+        let cur_chunk_as_used = cur_chunk.mark_as_used_without_updating_freelist_and_next_chunk();
 
         // shrink cur chunk to only include the content and not the end padding.
         cur_chunk_as_used.set_size(layout_size);
@@ -498,8 +508,8 @@ pub struct SpinLockedAllocator(spin::Mutex<Allocator>);
 
 #[cfg(feature = "spin")]
 impl SpinLockedAllocator {
-    /// Creates an empty locked heap allocator without any heap memory region, which
-    /// will always return null on allocation requests.
+    /// Creates an empty locked heap allocator without any heap memory region,
+    /// which will always return null on allocation requests.
     ///
     /// To intiialize this allocator, use the `init` method.
     pub const fn empty() -> Self {
@@ -512,11 +522,12 @@ impl SpinLockedAllocator {
     ///
     /// If the allocator was already initialized, this function will panic.
     ///
-    /// The `SpinLockedAllocator` on which this was called must not be moved, and its
-    /// address in memory must not change, otherwise undefined behaviour
-    /// will occur. This is because the heap region now contains pointers to
-    /// fields of this struct, and if this struct will move, the address of
-    /// its fields will change, and those pointers will now be invalid.
+    /// The `SpinLockedAllocator` on which this was called must not be moved,
+    /// and its address in memory must not change, otherwise undefined
+    /// behaviour will occur. This is because the heap region now contains
+    /// pointers to fields of this struct, and if this struct will move, the
+    /// address of its fields will change, and those pointers will now be
+    /// invalid.
     ///
     /// The provided memory region must be valid and non-null, and must not be
     /// used by anything else.
@@ -535,6 +546,7 @@ unsafe impl core::alloc::GlobalAlloc for SpinLockedAllocator {
         let mut allocator = self.0.lock();
         allocator.alloc(layout)
     }
+
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
         let mut allocator = self.0.lock();
         allocator.dealloc(ptr)

@@ -10,3 +10,4 @@ spin = { version = "0.9.4", optional = true }
 
 [dev-dependencies]
 balloc = { path = ".", features = ["spin"] }
+rand = "0.8.5"

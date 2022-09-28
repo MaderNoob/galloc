@@ -218,12 +218,14 @@ impl UsedChunk {
         self.0.set_size(new_size)
     }
 
-    /// Marks this chunk as free, and inserts this chunk into the linked list between fd and bk.
+    /// Marks this chunk as free, and inserts this chunk into the linked list
+    /// between fd and bk.
     ///
     /// # Safety
     ///
-    /// This function doesn't update the next chunk that this chunk is now free, you must make
-    /// sure that the next chunk's prev in use flag is correct.
+    /// This function doesn't update the next chunk that this chunk is now free,
+    /// you must make sure that the next chunk's prev in use flag is
+    /// correct.
     pub unsafe fn mark_as_free_without_updating_next_chunk(
         &mut self,
         fd: Option<FreeChunkPtr>,
@@ -354,6 +356,23 @@ impl FreeChunk {
     }
 
     /// Marks this free chunk as used and updates its next chunk, but without
+    /// updating the linked list of free chunks, and without updating the next
+    /// chunk.
+    ///
+    /// # Safety
+    ///
+    /// You must make sure to remove this chunk from the linked list of free
+    /// chunks, since it is now used.
+    ///
+    /// You must also make sure that the next chunk knows that this chunk is now
+    /// used.
+    pub unsafe fn mark_as_used_without_updating_freelist_and_next_chunk(&mut self) -> UsedChunkRef {
+        self.header.set_is_free(false);
+
+        core::mem::transmute(self)
+    }
+
+    /// Marks this free chunk as used and updates its next chunk, but without
     /// updating the linked list of free chunks.
     ///
     /// # Safety
@@ -440,8 +459,8 @@ impl FreeChunk {
     ///
     /// # Safety
     ///
-    /// You must make sure to make use of this chunk and keep track of it, do not lose
-    /// the memory.
+    /// You must make sure to make use of this chunk and keep track of it, do
+    /// not lose the memory.
     pub unsafe fn unlink(&mut self) {
         // unlink this chunk from the linked list of free chunks, to do that we
         // need to change the state:

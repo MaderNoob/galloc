@@ -1,45 +1,13 @@
+use rand::{seq::SliceRandom, Rng};
+
 use super::*;
-
-fn assert_only_1_free_chunk<const MEM_SIZE: usize>(
-    guard: &mut AllocatorInitGuard<MEM_SIZE>,
-    mem_size: usize,
-) {
-    let addr = guard.addr();
-
-    let free_chunk = unsafe {
-        match Chunk::from_addr(addr) {
-            ChunkRef::Used(_) => panic!("first chunk in heap is marked used after dealloc"),
-            ChunkRef::Free(free) => free,
-        }
-    };
-
-    // the first chunk's prev in use flag must be `true`.
-    assert_eq!(free_chunk.header.prev_in_use(), true);
-
-    assert_eq!(free_chunk.size(), mem_size - HEADER_SIZE);
-
-    // it is the only free chunk, so no fd
-    assert_eq!(free_chunk.fd, None);
-
-    // it is the only free chunk, so back should point to the allocator
-    assert_eq!(
-        free_chunk.ptr_to_fd_of_bk,
-        (&mut guard.allocator.free_chunk) as *mut _
-    );
-
-    // make sure the allocator points to that free chunk
-    assert_eq!(
-        guard.allocator.free_chunk,
-        Some(unsafe { NonNull::new_unchecked(free_chunk as *mut _) })
-    );
-}
 
 #[test]
 fn dealloc_prev_used_next_used() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     // calculate the allocation size that will fit perfectly
     let perfect_fit = MEM_SIZE - HEADER_SIZE;
@@ -58,14 +26,14 @@ fn dealloc_prev_used_next_used() {
 fn dealloc_prev_used_next_free() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     // calculate the allocation size that will fit perfectly
     let perfect_fit = MEM_SIZE - HEADER_SIZE;
 
     // a size that will leave end padding that is large enough to fit a free chunk.
-    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE;
+    let size_with_large_enough_end_padding = perfect_fit - MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER;
 
     let allocated = unsafe {
         guard
@@ -84,23 +52,23 @@ fn dealloc_prev_used_next_free() {
 fn dealloc_prev_free_next_used() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     let allocated1 = unsafe {
-        guard
-            .allocator
-            .alloc(Layout::from_size_align(MIN_FREE_CHUNK_SIZE - HEADER_SIZE, 1).unwrap())
+        guard.allocator.alloc(
+            Layout::from_size_align(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE, 1).unwrap(),
+        )
     };
 
     let allocated2 = unsafe {
-        guard
-            .allocator
-            .alloc(Layout::from_size_align(MIN_FREE_CHUNK_SIZE - HEADER_SIZE, 1).unwrap())
+        guard.allocator.alloc(
+            Layout::from_size_align(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE, 1).unwrap(),
+        )
     };
 
     // allocate the rest of the heap
-    let third_chunk_size = MEM_SIZE - 2 * MIN_FREE_CHUNK_SIZE - HEADER_SIZE;
+    let third_chunk_size = MEM_SIZE - 2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
     let allocated3 = unsafe {
         guard
             .allocator
@@ -111,14 +79,14 @@ fn dealloc_prev_free_next_used() {
         guard.allocator.dealloc(allocated1);
     }
 
-    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE);
+    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
 
     unsafe {
         guard.allocator.dealloc(allocated2);
     }
 
     // treat it as if the 2 first chunks are now the entire heap
-    assert_only_1_free_chunk(&mut guard, 2 * MIN_FREE_CHUNK_SIZE);
+    assert_only_1_free_chunk(&mut guard, 2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
 
     // make sure the prev in use and size of the third chunk is correct
     let third_chunk_addr = (allocated3 as usize) - HEADER_SIZE;
@@ -127,13 +95,13 @@ fn dealloc_prev_free_next_used() {
             ChunkRef::Used(used) => used,
             ChunkRef::Free(_) => {
                 panic!("the third chunk is marked free even though it wasn't deallocated")
-            }
+            },
         }
     };
 
     assert_eq!(
         third_chunk.prev_size_if_free(),
-        Some(2 * MIN_FREE_CHUNK_SIZE - HEADER_SIZE)
+        Some(2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE)
     );
 
     assert_eq!(third_chunk.0.size(), third_chunk_size);
@@ -149,23 +117,23 @@ fn dealloc_prev_free_next_used() {
 fn dealloc_prev_free_next_free() {
     const MEM_SIZE: usize = USIZE_SIZE * 17;
 
-    let mut guard = AllocatorInitGuard::<MEM_SIZE>::empty();
-    guard.init();
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
 
     let allocated1 = unsafe {
-        guard
-            .allocator
-            .alloc(Layout::from_size_align(MIN_FREE_CHUNK_SIZE - HEADER_SIZE, 1).unwrap())
+        guard.allocator.alloc(
+            Layout::from_size_align(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE, 1).unwrap(),
+        )
     };
 
     let allocated2 = unsafe {
-        guard
-            .allocator
-            .alloc(Layout::from_size_align(MIN_FREE_CHUNK_SIZE - HEADER_SIZE, 1).unwrap())
+        guard.allocator.alloc(
+            Layout::from_size_align(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE, 1).unwrap(),
+        )
     };
 
     // allocate the rest of the heap
-    let third_chunk_size = MEM_SIZE - 2 * MIN_FREE_CHUNK_SIZE - HEADER_SIZE;
+    let third_chunk_size = MEM_SIZE - 2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
     let allocated3 = unsafe {
         guard
             .allocator
@@ -176,7 +144,7 @@ fn dealloc_prev_free_next_free() {
         guard.allocator.dealloc(allocated1);
     }
 
-    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE);
+    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
 
     unsafe {
         guard.allocator.dealloc(allocated3);
@@ -201,14 +169,17 @@ fn dealloc_prev_free_next_free() {
     // the first chunk's prev in use flag must be `true`.
     assert_eq!(first_chunk.header.prev_in_use(), true);
 
-    assert_eq!(first_chunk.size(), MIN_FREE_CHUNK_SIZE - HEADER_SIZE);
+    assert_eq!(
+        first_chunk.size(),
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
+    );
 
     // the first chunk is last in the linked list, and before it comes the third
     assert_eq!(first_chunk.fd, None,);
     assert_eq!(first_chunk.ptr_to_fd_of_bk, (&mut third_chunk.fd) as *mut _,);
 
-    // the third chunk's prev in use flag should be true because we haven't deallocated
-    // the second chunk.
+    // the third chunk's prev in use flag should be true because we haven't
+    // deallocated the second chunk.
     assert_eq!(third_chunk.header.prev_in_use(), true);
 
     assert_eq!(third_chunk.size(), third_chunk_size);
@@ -237,19 +208,94 @@ fn dealloc_prev_free_next_free() {
             ChunkRef::Used(used) => used,
             ChunkRef::Free(_) => {
                 panic!("the second chunk is marked free even though it wasn't deallocated")
-            }
+            },
         }
     };
 
     assert_eq!(
         second_chunk.prev_size_if_free(),
-        Some(MIN_FREE_CHUNK_SIZE - HEADER_SIZE)
+        Some(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE)
     );
 
-    assert_eq!(second_chunk.0.size(), MIN_FREE_CHUNK_SIZE - HEADER_SIZE);
+    assert_eq!(
+        second_chunk.0.size(),
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
+    );
 
     unsafe {
         guard.allocator.dealloc(allocated2);
+    }
+
+    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+}
+
+#[test]
+fn dealloc_lots_of_allocations() {
+    const MEM_SIZE: usize = USIZE_SIZE * 17;
+
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
+
+    let mut allocations = Vec::new();
+
+    let smallest_chunk_size = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
+
+    // allocate the entire heap
+    loop {
+        let allocated = unsafe {
+            guard
+                .allocator
+                .alloc(Layout::from_size_align(smallest_chunk_size, 1).unwrap())
+        };
+        if allocated.is_null() {
+            break;
+        }
+
+        allocations.push(allocated);
+    }
+
+    for allocation in allocations {
+        unsafe {
+            guard.allocator.dealloc(allocation);
+        }
+    }
+
+    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+}
+
+#[test]
+fn dealloc_lots_of_allocations_dealloc_in_random_order() {
+    const MEM_SIZE: usize = USIZE_SIZE * 17;
+
+    let mut guard = AllocatorInitGuard::empty();
+    guard.init(MEM_SIZE);
+
+    let mut allocations = Vec::new();
+
+    let smallest_chunk_size = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
+
+    // allocate the entire heap
+    loop {
+        let allocated = unsafe {
+            guard
+                .allocator
+                .alloc(Layout::from_size_align(smallest_chunk_size, 1).unwrap())
+        };
+        if allocated.is_null() {
+            break;
+        }
+
+        allocations.push(allocated);
+    }
+
+    let mut rng = rand::thread_rng();
+
+    allocations.shuffle(&mut rng);
+
+    for allocation in allocations {
+        unsafe {
+            guard.allocator.dealloc(allocation);
+        }
     }
 
     assert_only_1_free_chunk(&mut guard, MEM_SIZE);
