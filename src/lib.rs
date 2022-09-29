@@ -97,13 +97,29 @@ impl Allocator {
         }
     }
 
+    /// Prepares an allocation size according to the requirements of
+    /// the allocator. Returns the prepared size.
+    fn prepare_size(size: usize) -> usize {
+        unsafe {
+            align_up(
+                core::cmp::max(size, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE),
+                CHUNK_SIZE_ALIGNMENT,
+            )
+        }
+    }
+
+    /// Prepares a layout's size and alignment according to the requirements of
+    /// the allocator. Returns the prepared size and alignment.
+    fn prepare_layout(layout: Layout) -> (usize, usize) {
+        let layout_size = Self::prepare_size(layout.size());
+        let layout_align = core::cmp::max(layout.align(), MIN_ALIGNMENT);
+
+        (layout_size, layout_align)
+    }
+
     /// Allocates memory.
     pub unsafe fn alloc(&mut self, layout: core::alloc::Layout) -> *mut u8 {
-        let layout_size = align_up(
-            core::cmp::max(layout.size(), 2 * USIZE_SIZE),
-            CHUNK_SIZE_ALIGNMENT,
-        );
-        let layout_align = core::cmp::max(layout.align(), MIN_ALIGNMENT);
+        let (layout_size, layout_align) = Self::prepare_layout(layout);
 
         let mut maybe_cur_chunk_ptr = self.free_chunk;
         while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
@@ -214,6 +230,35 @@ impl Allocator {
             },
         }
     }
+
+    /// Resizes an allocation previously returned from `alloc`.
+    /// The alignment of the content will stay the same.
+    pub unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let (previously_requested_size, layout_align) = Self::prepare_layout(layout);
+        let new_size = Self::prepare_size(new_size);
+
+        let chunk = UsedChunk::from_addr(ptr as usize - HEADER_SIZE);
+        let chunk_size = chunk.0.size();
+
+        if new_size > previously_requested_size {
+            // the user requested to grow his allocation.
+
+            // sometimes chunks are bigger than their content due to end padding that's not
+            // big enough to fit a chunk, check if that's the case.
+            if chunk_size >= new_size {
+                // if the chunk is already large enough, no need to do anything.
+                return ptr;
+            }
+
+            // if the chunk is not large enough, try to grow it in place.
+        }
+
+        // // try to shrink the chunk
+        // if new_size < chunk.0.size() {
+        // } else {
+        //     // try to grow the chunk
+        // }
+    }
 }
 
 pub struct HeapRegion {
@@ -224,7 +269,11 @@ pub struct HeapRegion {
 impl HeapRegion {
     /// Allocates an unaligned chunk by splitting a start padding chunk from it,
     /// and then proceeding as usual.
-    fn alloc_unaligned(
+    ///
+    /// # Safety
+    ///
+    /// The provided size and align must have been prepared.
+    unsafe fn alloc_unaligned(
         &mut self,
         layout_size: usize,
         layout_align: usize,
@@ -268,7 +317,11 @@ impl HeapRegion {
     /// Allocates an unaligned chunk after splitting its start padding to a
     /// different chunk, given the address and size of the allocated chunk that
     /// is next to the start padding chunk.
-    fn alloc_unaligned_after_splitting_start_padding(
+    ///
+    /// # Safety
+    ///
+    /// The provided size and align must have been prepared.
+    unsafe fn alloc_unaligned_after_splitting_start_padding(
         &mut self,
         layout_size: usize,
         allocated_chunk_addr: usize,
@@ -359,6 +412,7 @@ impl HeapRegion {
     ///  - the range of memory
     ///    `allocated_chunk_addr..allocated_chunk_addr+allocated_chunk_size`
     ///    must be valid and must not be used by any other chunk.
+    ///  - the provided size must have been prepared.
     unsafe fn alloc_unaligned_after_splitting_start_padding_split_end_padding_chunk(
         &mut self,
         layout_size: usize,
@@ -404,7 +458,11 @@ impl HeapRegion {
 
     /// Allocates a chunk that is already aligned to the desired alignment of
     /// the content.
-    fn alloc_aligned(
+    ///
+    /// # Safety
+    ///
+    /// The provided size must have been prepared.
+    unsafe fn alloc_aligned(
         &mut self,
         layout_size: usize,
         cur_chunk: FreeChunkRef,
@@ -456,7 +514,9 @@ impl HeapRegion {
     ///
     /// # Safety
     ///
-    /// `end_padding` must be greater than or equal to [`MIN_FREE_CHUNK_SIZE`].
+    ///  - `end_padding` must be greater than or equal to
+    ///    [`MIN_FREE_CHUNK_SIZE`].
+    ///  - the provided size must have been prepared.
     unsafe fn alloc_aligned_split_end_padding_chunk(
         &mut self,
         layout_size: usize,
@@ -497,6 +557,133 @@ impl HeapRegion {
 
         // return a pointer to the allocated chunk
         NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8)
+    }
+
+    /// Tries to reallocate the given chunk to the given new size, in place.
+    ///
+    /// # Safety
+    ///
+    /// `previously_requested_size` and `new_size` must have been prepared.
+    unsafe fn try_realloc_in_place(
+        &self,
+        chunk: UsedChunkRef,
+        previously_requested_size: usize,
+        new_size: usize,
+    ) -> bool {
+        let chunk_size = chunk.0.size();
+
+        if new_size > previously_requested_size {
+            // the user requested to grow his allocation.
+
+            // sometimes chunks are bigger than their content due to end padding that's not
+            // big enough to fit a chunk, check if that's the case.
+            if chunk_size >= new_size {
+                // if the chunk is already large enough, no need to do anything.
+                return true;
+            }
+
+            // if the chunk is not large enough, try to grow it in place.
+            self.try_grow_in_place(chunk, new_size)
+        } else {
+            todo!("shrink in place")
+        }
+    }
+
+    /// Tries to grow the given chunk in place, to the given new size. Please
+    /// note that this means that the alignment of the content of this chunk
+    /// will stay exactly the same.
+    ///
+    /// Returns whether or not the operation was successful.
+    ///
+    /// # Safety
+    ///
+    /// `new_size` must be greater than the chunk's size, and must have been
+    /// prepared.
+    unsafe fn try_grow_in_place(&self, chunk: UsedChunkRef, new_size: usize) -> bool {
+        // to grow this chunk we need its next chunk to be free, make sure that the next
+        // chunk is free.
+        let next_chunk_free = match chunk.next_chunk_if_free(self.heap_end_addr) {
+            Some(next_chunk_free) => next_chunk_free,
+
+            // if the next chunk is not free, we can't grow this chunk in place.
+            None => return false,
+        };
+
+        // calculate the new end addresss of the chunk.
+        let new_end_addr = chunk.content_addr() + new_size;
+
+        // make sure that if we grow this chunk in place using the next chunk,
+        // the chunk's end address stays within the bounds of the next chunk and
+        // doesn't go beyound it.
+        //
+        // if the new end address is beyond the next free chunk, we can't grow in place,
+        // because the chunk after the next chunk must be used because there are no 2
+        // adjacent free chunks.
+        let next_chunk_end_addr = next_chunk_free.end_addr();
+        if new_end_addr > next_chunk_end_addr {
+            return false;
+        }
+
+        // we can grow in place using the next free chunk.
+        //
+        // we now need to check if the space left in the next chunk after
+        // growing (if there even is any space left) is large enough to store a
+        // free chunk there.
+        let space_left_at_end_of_next_free_chunk = next_chunk_end_addr - new_end_addr;
+        if space_left_at_end_of_next_free_chunk > MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
+            // the space left at the end of the next free chunk is enough to
+            // store a free chunk, so we must create a new free chunk for it
+            // while unlinking `next_chunk_free`, and then we can resize `chunk`
+            // to include the space between it and the new free chunk.
+            //
+            // also note that there is no need to update the prev in use of the
+            // next chunk of the next chunk, because its prev will be the new
+            // free chunk that we're creating, and its prev in use bit is
+            // already set to false.
+
+            // create a new free chunk where the resized chunk ends, for the
+            // space left there, no need to update the next chunk as explained above.
+            //
+            // this will also unlink `next_chunk_free` and put itself in place of it in the
+            // freelist.
+            FreeChunk::create_new_without_updating_next_chunk(
+                new_end_addr,
+                space_left_at_end_of_next_free_chunk - HEADER_SIZE,
+                next_chunk_free.fd,
+                next_chunk_free.ptr_to_fd_of_bk,
+            );
+
+            // resize `chunk` to the desired size. this will make `chunk` include all the
+            // space up to where the new free chunk was just created.
+            chunk.set_size(new_size);
+
+            // we have successfully grew the chunk in place.
+            true
+        } else {
+            // the space left at the end of the next free chunk is not enough to
+            // store a free chunk, so just include that space when growing this
+            // chunk.
+
+            // now we should just unlink the next free chunk and increase the
+            // size of the current chunk to include all of it.
+            //
+            // we must also update the prev in use bit of the next chunk of the
+            // next chunk, because its prev is now `chunk`, which is in use,
+            // while before calling this function its prev was
+            // `next_chunk_free`, which is free.
+            if let Some(next_chunk_of_next_chunk_addr) =
+                next_chunk_free.header.next_chunk_addr(self.heap_end_addr)
+            {
+                // its prev is now `chunk`, which is used.
+                Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_of_next_chunk_addr, true);
+            }
+            next_chunk_free.unlink();
+            // make sure that it includes all of the next chunk
+            chunk.set_size(next_chunk_end_addr - chunk.content_addr());
+
+            // we have successfully grew the chunk in place.
+            true
+        }
     }
 }
 
