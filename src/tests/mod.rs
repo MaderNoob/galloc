@@ -7,7 +7,7 @@ use core::alloc::Layout;
 use super::*;
 
 #[test]
-fn random_alloc_dealloc() {
+fn random_alloc_dealloc_realloc() {
     const MEM_SIZE: usize = USIZE_SIZE * 113;
     const RANDOM_ACTIONS_AMOUNT: usize = 10000;
     const TRIALS_AMOUNT: usize = 100;
@@ -23,6 +23,14 @@ fn random_alloc_dealloc() {
         let mut rng = rand::thread_rng();
 
         for _ in 0..RANDOM_ACTIONS_AMOUNT {
+            fn random_size(rng: &mut impl Rng, size_left: usize) -> usize {
+                let max_chunk_size = size_left - HEADER_SIZE;
+                let min_chunk_size = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
+                let unaligned_size = rng.gen_range(min_chunk_size..=max_chunk_size);
+                let aligned_size = unsafe { align_up(unaligned_size, CHUNK_SIZE_ALIGNMENT) };
+                aligned_size
+            }
+
             let rng_chose_allocation_over_deallocation: bool = rng.gen_bool(0.75);
             // if there are no allocations, or the next action was chosen to be an
             // allocation and there is enough size left for at least another chunk, do an
@@ -32,39 +40,57 @@ fn random_alloc_dealloc() {
                 || (rng_chose_allocation_over_deallocation
                     && size_left >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER)
             {
-                let max_chunk_size = size_left - HEADER_SIZE;
-                let min_chunk_size = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
-                let unaligned_size = rng.gen_range(min_chunk_size..=max_chunk_size);
-                let aligned_size = unsafe { align_up(unaligned_size, CHUNK_SIZE_ALIGNMENT) };
+                let size = random_size(&mut rng, size_left);
+                let alignment = 1 << rng.gen_range(0..=10);
                 let ptr = unsafe {
                     guard
                         .allocator
-                        .alloc(Layout::from_size_align(aligned_size, 1).unwrap())
+                        .alloc(Layout::from_size_align(size, alignment).unwrap())
                 };
 
                 if !ptr.is_null() {
-                    allocations.push((ptr, aligned_size));
+                    allocations.push((ptr, size, alignment));
 
                     // adjust the size left
-                    size_left -= aligned_size + HEADER_SIZE;
+                    size_left -= size + HEADER_SIZE;
 
                     allocation_worked = true;
                 }
             }
 
-            if !allocation_worked {
-                // deallocate a random chunk.
-                let random_index = rng.gen_range(0..allocations.len());
-                let (ptr, allocation_size) = allocations.swap_remove(random_index);
-                unsafe { guard.allocator.dealloc(ptr) }
+            if !allocation_worked && !allocations.is_empty() {
+                // decide randomly whether to realloc or dealloc
+                if rng.gen::<bool>() && size_left >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
+                    let random_index = rng.gen_range(0..allocations.len());
+                    let (ptr, allocation_size, alignment) = &mut allocations[random_index];
+                    let new_size = random_size(&mut rng, size_left + *allocation_size);
+                    let new_ptr = unsafe {
+                        guard.allocator.realloc(
+                            *ptr,
+                            Layout::from_size_align(*allocation_size, *alignment).unwrap(),
+                            new_size,
+                        )
+                    };
 
-                size_left += allocation_size + HEADER_SIZE;
+                    if !new_ptr.is_null() {
+                        // realloc succeeded
+                        *allocation_size = new_size;
+                        *ptr = new_ptr;
+                    }
+                } else {
+                    // deallocate a random chunk.
+                    let random_index = rng.gen_range(0..allocations.len());
+                    let (ptr, allocation_size, _alignment) = allocations.swap_remove(random_index);
+                    unsafe { guard.allocator.dealloc(ptr) }
+
+                    size_left += allocation_size + HEADER_SIZE;
+                }
             }
         }
 
         // once we are done, deallocate all allocations, in random order.
         allocations.shuffle(&mut rng);
-        for (allocation, _size) in allocations {
+        for (allocation, _size, _alignment) in allocations {
             unsafe { guard.allocator.dealloc(allocation) }
         }
 

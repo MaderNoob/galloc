@@ -427,7 +427,7 @@ impl FreeChunk {
         size: usize,
         fd: Option<FreeChunkPtr>,
         ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-    ) -> FreeChunkPtr {
+    ) -> FreeChunkRef {
         let created_chunk_ref = FreeChunk::from_addr(addr);
 
         // write the chunk header and content
@@ -452,7 +452,41 @@ impl FreeChunk {
         // make `bk` point to this chunk
         *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(addr as *mut _));
 
-        FreeChunkPtr::new_unchecked(addr as *mut _)
+        created_chunk_ref
+    }
+
+    /// Creates a new free chunk at the given address, with the given size.
+    ///
+    /// The new chunk will be marked as free, and its `prev_in_use` flag will be
+    /// set to `true`, because no 2 free chunks can be adjacent.
+    ///
+    /// The new chunk will also be linked into the linked list between fd and
+    /// bk.
+    ///
+    /// The next chunk after this free chunk will be updated that its prev chunk
+    /// is now free.
+    ///
+    /// # Safety
+    ///
+    ///  - `addr` must be a valid non-null memory address which is not used by
+    ///    any other chunk.
+    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
+    pub unsafe fn create_new_and_update_next_chunk(
+        addr: usize,
+        size: usize,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+        heap_end_addr: usize,
+    ) -> FreeChunkRef {
+        // this is safe because right after it we update the next chunk
+        let free_chunk =
+            FreeChunk::create_new_without_updating_next_chunk(addr, size, fd, ptr_to_fd_of_bk);
+
+        if let Some(next_chunk_addr) = free_chunk.header.next_chunk_addr(heap_end_addr) {
+            Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
+        }
+
+        free_chunk
     }
 
     /// Unlinks this chunk from the linked list of free chunks.
