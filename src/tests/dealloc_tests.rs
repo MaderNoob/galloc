@@ -1,4 +1,4 @@
-use rand::{seq::SliceRandom, Rng};
+use rand::seq::SliceRandom;
 
 use super::*;
 

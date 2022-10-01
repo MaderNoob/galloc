@@ -1,5 +1,5 @@
 [package]
-name = "balloc"
+name = "galloc"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,5 +9,12 @@ edition = "2021"
 spin = { version = "0.9.4", optional = true }
 
 [dev-dependencies]
-balloc = { path = ".", features = ["spin"] }
-rand = "0.8.5"
+rand =  { version = "0.8.5", features = ["small_rng"] }
+linked_list_allocator = "0.10.3"
+simple-chunk-allocator = "0.1.5"
+strum = "0.24.1"
+strum_macros = "0.24.1"
+arrayvec = "0.7.2"
+
+[features]
+default = ["spin"]

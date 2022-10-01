@@ -4,18 +4,6 @@
 pub struct DivisbleBy4Usize(usize);
 
 impl DivisbleBy4Usize {
-    /// Creates divisble by 4 usize if the given value is divisble by 4, and
-    /// stores the given additional bits in it.
-    pub fn new(n: usize, additional_bit1: bool, additional_bit2: bool) -> Option<Self> {
-        if n & 0b11 != 0 {
-            return None;
-        }
-        unsafe {
-            // SAFETY: we just checked that this is safe
-            Some(Self::new_unchecked(n, additional_bit1, additional_bit2))
-        }
-    }
-
     /// Creates a divisible by 4 usize without checking if the given value is
     /// divisible by 4, and stores the given additional bits in it.
     /// This results in undefined behaviour if the value is not divisible by 4.
@@ -69,25 +57,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn return_none_if_usize_is_not_divisible_by_4() {
-        assert!(DivisbleBy4Usize::new(7, false, false).is_none())
-    }
-
-    #[test]
-    fn returns_some_if_usize_is_divisible_by_4() {
-        assert!(DivisbleBy4Usize::new(8, false, false).is_some())
-    }
-
-    #[test]
     fn saves_additional_bits_correctly() {
-        let u = DivisbleBy4Usize::new(24, true, false).unwrap();
+        let u = unsafe { DivisbleBy4Usize::new_unchecked(24, true, false) };
         assert_eq!(u.additional_bit1(), true);
         assert_eq!(u.additional_bit2(), false);
     }
 
     #[test]
     fn set_values_updates_values_and_doesnt_change_other_values() {
-        let mut u = DivisbleBy4Usize::new(24, false, false).unwrap();
+        let mut u = unsafe { DivisbleBy4Usize::new_unchecked(24, false, false) };
 
         u.set_additional_bit1(true);
         assert_eq!(u.additional_bit1(), true);

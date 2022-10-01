@@ -1,3 +1,9 @@
+#![no_std]
+
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+
 mod alignment;
 mod chunks;
 mod divisible_by_4_usize;
@@ -183,7 +189,6 @@ impl Allocator {
                 let _ = chunk.mark_as_free_without_updating_next_chunk(
                     next_chunk_free.fd,
                     next_chunk_free.ptr_to_fd_of_bk,
-                    self.heap_region.heap_end_addr,
                 );
             },
             (Some(prev_chunk_free), None) => {
@@ -231,7 +236,7 @@ impl Allocator {
         }
     }
 
-    /// Resizes an allocation previously returned from `alloc`.
+    /// Resizes an allocation previously returned from `alloc` or `realloc`.
     /// The alignment of the content will stay the same.
     pub unsafe fn realloc(&mut self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let previously_requested_size = Self::prepare_size(layout.size());
@@ -256,7 +261,11 @@ impl Allocator {
             // block. The safety contract for `dealloc` must be upheld by the
             // caller.
             unsafe {
-                std::ptr::copy_nonoverlapping(ptr, new_ptr, std::cmp::min(layout.size(), new_size));
+                core::ptr::copy_nonoverlapping(
+                    ptr,
+                    new_ptr,
+                    core::cmp::min(layout.size(), new_size),
+                );
                 self.dealloc(ptr);
             }
         }

@@ -32,11 +32,6 @@ impl Chunk {
         chunk.set_prev_in_use(prev_in_use)
     }
 
-    /// Creates a new chunk header, if the size is divisible by 4.
-    fn new(size: usize, is_free: bool, prev_in_use: bool) -> Option<Self> {
-        DivisbleBy4Usize::new(size, is_free, prev_in_use).map(Self)
-    }
-
     /// Creates a new chunk header.
     ///
     /// # Safety
@@ -94,11 +89,6 @@ impl Chunk {
     /// The address where this chunk ends.
     pub fn end_addr(&self) -> usize {
         self.content_addr() + self.size()
-    }
-
-    /// Checks if this chunk is the last chunk.
-    pub fn is_last_chunk(&self, heap_end_addr: usize) -> bool {
-        self.end_addr() == heap_end_addr
     }
 
     /// Returns the address of the next chunk in memory, if the current chunk is
@@ -230,7 +220,6 @@ impl UsedChunk {
         &mut self,
         fd: Option<FreeChunkPtr>,
         ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-        heap_end_addr: usize,
     ) -> FreeChunkRef {
         self.0.set_is_free(true);
 
@@ -266,9 +255,8 @@ impl UsedChunk {
         heap_end_addr: usize,
     ) -> FreeChunkRef {
         // SAFETY: we update the next chunk right after calling this.
-        let as_free_chunk = unsafe {
-            self.mark_as_free_without_updating_next_chunk(fd, ptr_to_fd_of_bk, heap_end_addr)
-        };
+        let as_free_chunk =
+            unsafe { self.mark_as_free_without_updating_next_chunk(fd, ptr_to_fd_of_bk) };
 
         // update the next chunk.
         if let Some(next_chunk_addr) = as_free_chunk.header.next_chunk_addr(heap_end_addr) {

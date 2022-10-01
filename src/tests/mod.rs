@@ -3,6 +3,7 @@ mod alloc_tests;
 mod dealloc_tests;
 
 use core::alloc::Layout;
+use std::vec::Vec;
 
 use super::*;
 
