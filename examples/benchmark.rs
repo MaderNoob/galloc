@@ -48,7 +48,7 @@ unsafe impl GlobalAlloc for SpinLockedAnyAllocator {
                     Ok(ptr) => ptr.as_ptr(),
                     Err(()) => std::ptr::null_mut(),
                 }
-            },
+            }
             AnyAllocator::Galloc(allocator) => allocator.alloc(layout),
             AnyAllocator::ChunkAllocator(allocator) => match allocator.allocate(layout) {
                 Ok(ptr) => ptr.as_ptr() as *mut u8,
@@ -64,22 +64,22 @@ unsafe impl GlobalAlloc for SpinLockedAnyAllocator {
             AnyAllocator::System(allocator) => allocator.dealloc(ptr, layout),
             AnyAllocator::LinkedListAllocator(allocator) => {
                 allocator.deallocate(NonNull::new_unchecked(ptr), layout)
-            },
+            }
             AnyAllocator::Galloc(allocator) => allocator.dealloc(ptr),
             AnyAllocator::ChunkAllocator(allocator) => {
                 allocator.deallocate(NonNull::new_unchecked(ptr), layout)
-            },
+            }
         }
     }
 
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         let size = layout.size();
         // SAFETY: the safety contract for `alloc` must be upheld by the caller.
-        let ptr = unsafe { self.alloc(layout) };
+        let ptr = self.alloc(layout);
         if !ptr.is_null() {
             // SAFETY: as allocation succeeded, the region from `ptr`
             // of size `size` is guaranteed to be valid for writes.
-            unsafe { std::ptr::write_bytes(ptr, 0, size) };
+            std::ptr::write_bytes(ptr, 0, size);
         }
         ptr
     }
@@ -103,24 +103,23 @@ unsafe impl GlobalAlloc for SpinLockedAnyAllocator {
                     // SAFETY: the previously allocated block cannot overlap the newly allocated
                     // block. The safety contract for `dealloc` must be upheld by the
                     // caller.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            ptr,
-                            new_ptr,
-                            std::cmp::min(layout.size(), new_size),
-                        );
-                        self.dealloc(ptr, layout);
-                    }
+
+                    std::ptr::copy_nonoverlapping(
+                        ptr,
+                        new_ptr,
+                        std::cmp::min(layout.size(), new_size),
+                    );
+                    self.dealloc(ptr, layout);
                 }
                 new_ptr
-            },
+            }
             AnyAllocator::Galloc(allocator) => allocator.realloc(ptr, layout, new_size),
             AnyAllocator::ChunkAllocator(allocator) => {
                 match allocator.realloc(NonNull::new_unchecked(ptr), layout, new_size) {
                     Ok(ptr) => ptr.as_ptr() as *mut u8,
                     Err(_) => std::ptr::null_mut(),
                 }
-            },
+            }
         }
     }
 }

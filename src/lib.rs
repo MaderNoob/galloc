@@ -170,7 +170,7 @@ impl Allocator {
                     &mut self.free_chunk,
                     self.heap_region.heap_end_addr,
                 );
-            },
+            }
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -190,7 +190,7 @@ impl Allocator {
                     next_chunk_free.fd,
                     next_chunk_free.ptr_to_fd_of_bk,
                 );
-            },
+            }
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it
@@ -207,7 +207,7 @@ impl Allocator {
                 {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            },
+            }
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -232,7 +232,7 @@ impl Allocator {
                         + HEADER_SIZE
                         + next_chunk_free.size(),
                 );
-            },
+            }
         }
     }
 
@@ -253,21 +253,15 @@ impl Allocator {
         //
         // SAFETY: the caller must ensure that the `new_size` does not overflow.
         // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
-        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
         // SAFETY: the caller must ensure that `new_layout` is greater than zero.
-        let new_ptr = unsafe { self.alloc(new_layout) };
+        let new_ptr = self.alloc(new_layout);
         if !new_ptr.is_null() {
             // SAFETY: the previously allocated block cannot overlap the newly allocated
             // block. The safety contract for `dealloc` must be upheld by the
             // caller.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    ptr,
-                    new_ptr,
-                    core::cmp::min(layout.size(), new_size),
-                );
-                self.dealloc(ptr);
-            }
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, core::cmp::min(layout.size(), new_size));
+            self.dealloc(ptr);
         }
         new_ptr
     }
@@ -322,7 +316,7 @@ impl Allocator {
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            },
+            }
         };
 
         // calculate the new end addresss of the chunk.
@@ -437,7 +431,7 @@ impl Allocator {
 
                 // we have successfully shrinked the chunk in place.
                 true
-            },
+            }
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -469,7 +463,7 @@ impl Allocator {
                     // little bit of memory (up to 32 bytes).
                     true
                 }
-            },
+            }
         }
     }
 }
@@ -495,12 +489,10 @@ impl HeapRegion {
         // find an aligned start address which leaves enough space for a free chunk of
         // padding plus a header for the created chunk before the content chunk that is
         // returned to the user.
-        let aligned_content_start_addr = unsafe {
-            align_up(
-                cur_chunk.addr() + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
-                layout_align,
-            )
-        };
+        let aligned_content_start_addr = align_up(
+            cur_chunk.addr() + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
+            layout_align,
+        );
 
         let aligned_start_addr = aligned_content_start_addr - HEADER_SIZE;
 
@@ -548,15 +540,14 @@ impl HeapRegion {
             if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
                 // if the end padding is large enough to hold a free chunk, create a chunk
                 // there.
-                unsafe {
-                    // this is safe because we checked that `end_padding` is big enough
-                    self.alloc_unaligned_after_splitting_start_padding_split_end_padding_chunk(
-                        layout_size,
-                        end_padding,
-                        allocated_chunk_addr,
-                        start_padding_chunk,
-                    )
-                }
+                //
+                // this is safe because we checked that `end_padding` is big enough
+                self.alloc_unaligned_after_splitting_start_padding_split_end_padding_chunk(
+                    layout_size,
+                    end_padding,
+                    allocated_chunk_addr,
+                    start_padding_chunk,
+                )
             } else {
                 // if the end padding is not large enough to hold a free chunk, consider it a
                 // part of the allocated chunk. this is a little wasteful, but
@@ -564,21 +555,17 @@ impl HeapRegion {
                 // when we have enough space.
 
                 // this case can be considered the same as allocating without any end padding.
-                unsafe {
-                    self.alloc_unaligned_after_splitting_start_padding_no_end_padding(
-                        allocated_chunk_addr,
-                        allocated_chunk_size,
-                    )
-                }
-            }
-        } else {
-            // if there is no end padding
-            unsafe {
                 self.alloc_unaligned_after_splitting_start_padding_no_end_padding(
                     allocated_chunk_addr,
                     allocated_chunk_size,
                 )
             }
+        } else {
+            // if there is no end padding
+            self.alloc_unaligned_after_splitting_start_padding_no_end_padding(
+                allocated_chunk_addr,
+                allocated_chunk_size,
+            )
         }
     }
 
@@ -694,10 +681,10 @@ impl HeapRegion {
             if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
                 // if the end padding is large enough to hold a free chunk, create a chunk
                 // there.
-                Some(unsafe {
+                Some(
                     // this is safe because we checked that `end_padding` is big enough
-                    self.alloc_aligned_split_end_padding_chunk(layout_size, end_padding, cur_chunk)
-                })
+                    self.alloc_aligned_split_end_padding_chunk(layout_size, end_padding, cur_chunk),
+                )
             } else {
                 // if the end padding is not large enough to hold a free chunk, consider it a
                 // part of the allocated chunk. this is a little wasteful, but

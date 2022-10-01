@@ -223,7 +223,7 @@ impl UsedChunk {
     ) -> FreeChunkRef {
         self.0.set_is_free(true);
 
-        let as_free_chunk = unsafe { FreeChunk::from_addr(self.0.addr()) };
+        let as_free_chunk = FreeChunk::from_addr(self.0.addr());
 
         as_free_chunk.fd = fd;
         as_free_chunk.ptr_to_fd_of_bk = ptr_to_fd_of_bk;
@@ -235,13 +235,11 @@ impl UsedChunk {
         //
         // make `fd` point back to this chunk
         if let Some(mut fd) = fd {
-            let fd_ref = unsafe { fd.as_mut() };
+            let fd_ref = fd.as_mut();
             fd_ref.ptr_to_fd_of_bk = &mut as_free_chunk.fd;
         }
         // make `bk` point to this chunk
-        unsafe {
-            *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _))
-        }
+        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _));
 
         as_free_chunk
     }
