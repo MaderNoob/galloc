@@ -7,8 +7,12 @@ impl DivisbleBy4Usize {
     /// Creates a divisible by 4 usize without checking if the given value is
     /// divisible by 4, and stores the given additional bits in it.
     /// This results in undefined behaviour if the value is not divisible by 4.
-    pub unsafe fn new_unchecked(n: usize, additional_bit1: bool, additional_bit2: bool) -> Self {
-        Self(n | usize::from(additional_bit1) | usize::from(additional_bit2) << 1)
+    pub const unsafe fn new_unchecked(
+        n: usize,
+        additional_bit1: bool,
+        additional_bit2: bool,
+    ) -> Self {
+        Self(n | additional_bit1 as usize | ((additional_bit2 as usize) << 1))
     }
 
     /// Returns the divisble by 4 value as a `usize`.

@@ -95,7 +95,7 @@ fn dealloc_prev_free_next_used() {
             ChunkRef::Used(used) => used,
             ChunkRef::Free(_) => {
                 panic!("the third chunk is marked free even though it wasn't deallocated")
-            },
+            }
         }
     };
 
@@ -174,8 +174,9 @@ fn dealloc_prev_free_next_free() {
         MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
-    // the first chunk is last in the linked list, and before it comes the third
-    assert_eq!(first_chunk.fd, None,);
+    // the first chunk is last in the linked list so it points back to the allocator, and before
+    // it comes the third.
+    assert_eq!(first_chunk.fd, guard.allocator.fake_chunk_ptr());
     assert_eq!(first_chunk.ptr_to_fd_of_bk, (&mut third_chunk.fd) as *mut _,);
 
     // the third chunk's prev in use flag should be true because we haven't
@@ -185,20 +186,22 @@ fn dealloc_prev_free_next_free() {
     assert_eq!(third_chunk.size(), third_chunk_size);
 
     // the third chunk is the first in the freelist
-    assert_eq!(
-        third_chunk.fd,
-        Some(unsafe { NonNull::new_unchecked(first_chunk as *mut _) })
-    );
+    assert_eq!(third_chunk.fd, unsafe {
+        NonNull::new_unchecked(first_chunk as *mut _)
+    });
     assert_eq!(
         third_chunk.ptr_to_fd_of_bk,
-        (&mut guard.allocator.free_chunk) as *mut _
+        guard.allocator.ptr_to_fd_of_fake_chunk(),
     );
 
     // make sure the allocator points to the first chunk in the linked list which
     // is the third chunk.
+    assert_eq!(guard.allocator.first_free_chunk(), unsafe {
+        NonNull::new_unchecked(third_chunk as *mut _)
+    });
     assert_eq!(
-        guard.allocator.free_chunk,
-        Some(unsafe { NonNull::new_unchecked(third_chunk as *mut _) })
+        guard.allocator.fake_chunk.ptr_to_fd_of_bk,
+        &mut first_chunk.fd as *mut _
     );
 
     // make sure the prev in use of the second chunk is correct
@@ -208,7 +211,7 @@ fn dealloc_prev_free_next_free() {
             ChunkRef::Used(used) => used,
             ChunkRef::Free(_) => {
                 panic!("the second chunk is marked free even though it wasn't deallocated")
-            },
+            }
         }
     };
 

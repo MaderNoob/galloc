@@ -31,7 +31,7 @@ const CHUNK_SIZE_ALIGNMENT: usize = if MIN_ALIGNMENT < 4 { 4 } else { MIN_ALIGNM
 /// A linked list memory allocator.
 pub struct Allocator {
     heap_region: HeapRegion,
-    free_chunk: Option<FreeChunkPtr>,
+    fake_chunk: FreeChunk,
 }
 impl Allocator {
     /// Creates an empty heap allocator without any heap memory region, which
@@ -44,7 +44,11 @@ impl Allocator {
                 heap_start_addr: 0,
                 heap_end_addr: 0,
             },
-            free_chunk: None,
+            fake_chunk: FreeChunk {
+                header: unsafe { Chunk::new_unchecked(CHUNK_SIZE_ALIGNMENT, true, true) },
+                fd: NonNull::dangling(),
+                ptr_to_fd_of_bk: core::ptr::null_mut(),
+            },
         }
     }
 
@@ -92,8 +96,8 @@ impl Allocator {
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             aligned_heap_start_addr,
             aligned_size - HEADER_SIZE,
-            None,
-            &mut self.free_chunk,
+            NonNull::new_unchecked(&mut self.fake_chunk),
+            &mut self.fake_chunk.fd,
         );
 
         // update the heap region.
@@ -101,6 +105,21 @@ impl Allocator {
             heap_start_addr: aligned_heap_start_addr,
             heap_end_addr: aligned_heap_end_addr,
         }
+    }
+
+    /// Returns a pointer to the fake chunk.
+    fn fake_chunk_ptr(&mut self) -> FreeChunkPtr {
+        unsafe { NonNull::new_unchecked(&mut self.fake_chunk) }
+    }
+
+    /// Returns a pointer to the first free chunk.
+    fn first_free_chunk(&self) -> FreeChunkPtr {
+        self.fake_chunk.fd
+    }
+
+    /// Returns a pointer to the fd of the fake chunk.
+    fn ptr_to_fd_of_fake_chunk(&mut self) -> *mut FreeChunkPtr {
+        &mut self.fake_chunk.fd
     }
 
     /// Prepares an allocation size according to the requirements of
@@ -125,10 +144,16 @@ impl Allocator {
 
     /// Allocates memory.
     pub unsafe fn alloc(&mut self, layout: core::alloc::Layout) -> *mut u8 {
+        if !self.was_initialized() {
+            return core::ptr::null_mut();
+        }
+
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
-        let mut maybe_cur_chunk_ptr = self.free_chunk;
-        while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
+        let fake_chunk_ptr = self.fake_chunk_ptr();
+        let mut cur_chunk_ptr = self.first_free_chunk();
+
+        while cur_chunk_ptr != fake_chunk_ptr {
             let cur_chunk = cur_chunk_ptr.as_mut();
             if is_aligned(cur_chunk.content_addr(), layout_align) {
                 // already aligned
@@ -149,7 +174,7 @@ impl Allocator {
                 }
             }
 
-            maybe_cur_chunk_ptr = cur_chunk.fd();
+            cur_chunk_ptr = cur_chunk.fd();
         }
 
         core::ptr::null_mut()
@@ -166,8 +191,8 @@ impl Allocator {
                 // mark the chunk as free, and adds it to the start of the linked list of free
                 // chunks.
                 let _ = chunk.mark_as_free(
-                    self.free_chunk,
-                    &mut self.free_chunk,
+                    self.first_free_chunk(),
+                    self.ptr_to_fd_of_fake_chunk(),
                     self.heap_region.heap_end_addr,
                 );
             }
@@ -447,8 +472,8 @@ impl Allocator {
                     let _ = FreeChunk::create_new_and_update_next_chunk(
                         new_end_addr,
                         space_left_at_end - HEADER_SIZE,
-                        self.free_chunk,
-                        &mut self.free_chunk,
+                        self.first_free_chunk(),
+                        self.ptr_to_fd_of_fake_chunk(),
                         self.heap_region.heap_end_addr,
                     );
 
@@ -690,7 +715,7 @@ impl HeapRegion {
                 // part of the allocated chunk. this is a little wasteful, but
                 // it prevents us from returning `null` from the allocator even
                 // when we have enough space.
-
+                //
                 // this case can be considered the same as allocating without any end padding.
                 Some(self.alloc_aligned_no_end_padding(cur_chunk))
             }

@@ -167,11 +167,11 @@ fn alloc_aligned_end_padding() {
         MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
-    // the end padding chunk is the only free chunk
-    assert_eq!(end_padding_chunk.fd, None,);
+    // the end padding chunk is the only free chunk so it points back to the allocator.
+    assert_eq!(end_padding_chunk.fd, guard.allocator.fake_chunk_ptr());
     assert_eq!(
         end_padding_chunk.ptr_to_fd_of_bk,
-        (&mut guard.allocator.free_chunk) as *mut _,
+        (guard.allocator.ptr_to_fd_of_fake_chunk()) as *mut _,
     );
 
     // make sure that the end padding size has written its postfix size
@@ -181,9 +181,12 @@ fn alloc_aligned_end_padding() {
     );
 
     // make sure that the allocator points to the end padding chunk.
+    assert_eq!(guard.allocator.first_free_chunk(), unsafe {
+        NonNull::new_unchecked(end_padding_chunk as *mut _)
+    });
     assert_eq!(
-        guard.allocator.free_chunk,
-        Some(unsafe { NonNull::new_unchecked(end_padding_chunk as *mut _) })
+        guard.allocator.fake_chunk.ptr_to_fd_of_bk,
+        &mut end_padding_chunk.fd as *mut _
     )
 }
 
@@ -264,14 +267,15 @@ fn alloc_unaligned_no_end_padding() {
     let start_padding_chunk_size = content_chunk_addr - addr - HEADER_SIZE;
     assert_eq!(start_padding_chunk.header.size(), start_padding_chunk_size);
 
-    // make sure that the start padding chunk is the last chunk in the freelist.
-    assert_eq!(start_padding_chunk.fd, None);
+    // make sure that the start padding chunk is the last chunk in the freelist,
+    // so it points back to the allocator.
+    assert_eq!(start_padding_chunk.fd, guard.allocator.fake_chunk_ptr());
 
     // make sure that the start padding chunk is the first chunk in the freelist and
     // points back to the allocator.
     assert_eq!(
         start_padding_chunk.ptr_to_fd_of_bk,
-        &mut guard.allocator.free_chunk as *mut _
+        guard.allocator.ptr_to_fd_of_fake_chunk(),
     );
 
     // make sure that the allocated chunk is correct
@@ -293,10 +297,13 @@ fn alloc_unaligned_no_end_padding() {
     assert_eq!(allocated_chunk.0.size(), perfect_fit);
 
     // make sure that the allocator's freelist points to the start padding chunk
+    assert_eq!(guard.allocator.first_free_chunk(), unsafe {
+        NonNull::new_unchecked(addr as *mut _)
+    });
     assert_eq!(
-        guard.allocator.free_chunk,
-        Some(unsafe { NonNull::new_unchecked(addr as *mut _) })
-    )
+        guard.allocator.fake_chunk.ptr_to_fd_of_bk,
+        &mut start_padding_chunk.fd as *mut _
+    );
 }
 
 #[test]
@@ -362,16 +369,15 @@ fn alloc_unaligned_end_padding() {
     assert_eq!(start_padding_chunk.header.size(), start_padding_chunk_size);
 
     // the start padding chunk should point to the end padding chunk.
-    assert_eq!(
-        start_padding_chunk.fd,
-        Some(unsafe { NonNull::new_unchecked(end_padding_chunk as *mut _) })
-    );
+    assert_eq!(start_padding_chunk.fd, unsafe {
+        NonNull::new_unchecked(end_padding_chunk as *mut _)
+    });
 
     // make sure that the start padding chunk is the first chunk in the freelist and
     // points back to the allocator.
     assert_eq!(
         start_padding_chunk.ptr_to_fd_of_bk,
-        &mut guard.allocator.free_chunk as *mut _
+        guard.allocator.ptr_to_fd_of_fake_chunk(),
     );
 
     // the prev chunk is the allocated chunk, which is in use.
@@ -384,8 +390,8 @@ fn alloc_unaligned_end_padding() {
         MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
-    // the end padding chunk is the last free chunk
-    assert_eq!(end_padding_chunk.fd, None);
+    // the end padding chunk is the last free chunk so it points back to the allocator.
+    assert_eq!(end_padding_chunk.fd, guard.allocator.fake_chunk_ptr());
 
     // the bk of the end padding chunk is the start padding chunk.
     assert_eq!(
@@ -418,8 +424,12 @@ fn alloc_unaligned_end_padding() {
     assert_eq!(allocated_chunk.0.size(), size_with_large_enough_end_padding);
 
     // make sure that the allocator's freelist points to the start padding chunk
+    assert_eq!(guard.allocator.first_free_chunk(), unsafe {
+        NonNull::new_unchecked(addr as *mut _)
+    });
+
     assert_eq!(
-        guard.allocator.free_chunk,
-        Some(unsafe { NonNull::new_unchecked(addr as *mut _) })
-    )
+        guard.allocator.fake_chunk.ptr_to_fd_of_bk,
+        &mut end_padding_chunk.fd as *mut _
+    );
 }
