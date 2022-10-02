@@ -30,7 +30,7 @@ const CHUNK_SIZE_ALIGNMENT: usize = if MIN_ALIGNMENT < 4 { 4 } else { MIN_ALIGNM
 
 /// A linked list memory allocator.
 pub struct Allocator {
-    heap_region: HeapRegion,
+    heap_end_addr: usize,
     fake_chunk: FreeChunk,
 }
 impl Allocator {
@@ -40,10 +40,7 @@ impl Allocator {
     /// To intiialize this allocator, use the `init` method.
     pub const fn empty() -> Self {
         Self {
-            heap_region: HeapRegion {
-                heap_start_addr: 0,
-                heap_end_addr: 0,
-            },
+            heap_end_addr: 0,
             fake_chunk: FreeChunk {
                 header: unsafe { Chunk::new_unchecked(CHUNK_SIZE_ALIGNMENT, true, true) },
                 fd: NonNull::dangling(),
@@ -55,7 +52,7 @@ impl Allocator {
     /// Checks if the heap memory region was already initialized by calling
     /// `init`.
     pub fn was_initialized(&self) -> bool {
-        !(self.heap_region.heap_start_addr == 0 && self.heap_region.heap_end_addr == 0)
+        self.heap_end_addr != 0
     }
 
     /// Initializes the heap allocator with the given memory region.
@@ -100,11 +97,8 @@ impl Allocator {
             &mut self.fake_chunk.fd,
         );
 
-        // update the heap region.
-        self.heap_region = HeapRegion {
-            heap_start_addr: aligned_heap_start_addr,
-            heap_end_addr: aligned_heap_end_addr,
-        }
+        // update the heap end address.
+        self.heap_end_addr = aligned_heap_end_addr;
     }
 
     /// Returns a pointer to the fake chunk.
@@ -157,19 +151,14 @@ impl Allocator {
             let cur_chunk = cur_chunk_ptr.as_mut();
             if is_aligned(cur_chunk.content_addr(), layout_align) {
                 // already aligned
-                if let Some(ptr) = self
-                    .heap_region
-                    .alloc_aligned(layout_size, cur_chunk_ptr.as_mut())
-                {
+                if let Some(ptr) = self.alloc_aligned(layout_size, cur_chunk_ptr.as_mut()) {
                     return ptr.as_ptr();
                 }
             } else {
                 // the chunk is not aligned
-                if let Some(ptr) = self.heap_region.alloc_unaligned(
-                    layout_size,
-                    layout_align,
-                    cur_chunk_ptr.as_mut(),
-                ) {
+                if let Some(ptr) =
+                    self.alloc_unaligned(layout_size, layout_align, cur_chunk_ptr.as_mut())
+                {
                     return ptr.as_ptr();
                 }
             }
@@ -185,7 +174,7 @@ impl Allocator {
         let chunk = UsedChunk::from_addr(ptr as usize - HEADER_SIZE);
         match (
             chunk.prev_chunk_if_free(),
-            chunk.next_chunk_if_free(self.heap_region.heap_end_addr),
+            chunk.next_chunk_if_free(self.heap_end_addr),
         ) {
             (None, None) => {
                 // mark the chunk as free, and adds it to the start of the linked list of free
@@ -193,7 +182,7 @@ impl Allocator {
                 let _ = chunk.mark_as_free(
                     self.first_free_chunk(),
                     self.ptr_to_fd_of_fake_chunk(),
-                    self.heap_region.heap_end_addr,
+                    self.heap_end_addr,
                 );
             }
             (None, Some(next_chunk_free)) => {
@@ -227,9 +216,7 @@ impl Allocator {
 
                 // we must also update the prev in use bit of the next chunk, if any, because
                 // its prev is now free.
-                if let Some(next_chunk_addr) =
-                    chunk.0.next_chunk_addr(self.heap_region.heap_end_addr)
-                {
+                if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
             }
@@ -335,7 +322,7 @@ impl Allocator {
     unsafe fn try_grow_in_place(&self, chunk: UsedChunkRef, new_size: usize) -> bool {
         // to grow this chunk we need its next chunk to be free, make sure that the next
         // chunk is free.
-        let next_chunk_free = match chunk.next_chunk_if_free(self.heap_region.heap_end_addr) {
+        let next_chunk_free = match chunk.next_chunk_if_free(self.heap_end_addr) {
             Some(next_chunk_free) => next_chunk_free,
 
             // if the next chunk is not free, we can't grow this chunk in place.
@@ -406,9 +393,8 @@ impl Allocator {
             // next chunk, because its prev is now `chunk`, which is in use,
             // while before calling this function its prev was
             // `next_chunk_free`, which is free.
-            if let Some(next_chunk_of_next_chunk_addr) = next_chunk_free
-                .header
-                .next_chunk_addr(self.heap_region.heap_end_addr)
+            if let Some(next_chunk_of_next_chunk_addr) =
+                next_chunk_free.header.next_chunk_addr(self.heap_end_addr)
             {
                 // its prev is now `chunk`, which is used.
                 Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_of_next_chunk_addr, true);
@@ -436,7 +422,7 @@ impl Allocator {
         // calculate the new end addresss of the chunk.
         let new_end_addr = chunk.content_addr() + new_size;
 
-        match chunk.next_chunk_if_free(self.heap_region.heap_end_addr) {
+        match chunk.next_chunk_if_free(self.heap_end_addr) {
             Some(next_chunk_free) => {
                 // if the next chunk is free, we can just move it back and shrink `chunk`.
                 // no need to update the next chunk, because it already knows that its prev
@@ -474,7 +460,7 @@ impl Allocator {
                         space_left_at_end - HEADER_SIZE,
                         self.first_free_chunk(),
                         self.ptr_to_fd_of_fake_chunk(),
-                        self.heap_region.heap_end_addr,
+                        self.heap_end_addr,
                     );
 
                     // resize `chunk` to the desired size.
@@ -491,14 +477,7 @@ impl Allocator {
             }
         }
     }
-}
 
-pub struct HeapRegion {
-    heap_start_addr: usize,
-    heap_end_addr: usize,
-}
-
-impl HeapRegion {
     /// Allocates an unaligned chunk by splitting a start padding chunk from it,
     /// and then proceeding as usual.
     ///
