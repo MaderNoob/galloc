@@ -102,13 +102,17 @@ impl Allocator {
     }
 
     /// Returns a pointer to the fake chunk.
-    fn fake_chunk_ptr(&mut self) -> FreeChunkPtr {
-        unsafe { NonNull::new_unchecked(&mut self.fake_chunk) }
+    fn fake_chunk_ptr(&self) -> FreeChunkPtr {
+        unsafe { NonNull::new_unchecked((&self.fake_chunk) as *const _ as *mut _) }
     }
 
-    /// Returns a pointer to the first free chunk.
-    fn first_free_chunk(&self) -> FreeChunkPtr {
-        self.fake_chunk.fd
+    /// Returns a pointer to the first free chunk, if any.
+    fn first_free_chunk(&self) -> Option<FreeChunkPtr> {
+        if self.fake_chunk.fd == self.fake_chunk_ptr() {
+            return None;
+        }
+
+        Some(self.fake_chunk.fd)
     }
 
     /// Returns a pointer to the fd of the fake chunk.
@@ -124,6 +128,30 @@ impl Allocator {
                 core::cmp::max(size, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE),
                 CHUNK_SIZE_ALIGNMENT,
             )
+        }
+    }
+
+    /// Returns fd and bk pointers for inserting a new free chunk to the freelist.
+    fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+        &mut self,
+        chunk_size: usize,
+    ) -> (FreeChunkPtr, *mut FreeChunkPtr) {
+        match self.first_free_chunk() {
+            // if the freelist is not empty
+            Some(mut first_free_chunk) => {
+                // check if the given chunk size is bigger than the current first chunk,
+                // and if so, put the given chunk at the start of the freelist.
+                //
+                // otherwise if the given chunk is smaller than the current first chunk,
+                // then put the given chunk at the end of the freelist.
+                if chunk_size > unsafe { first_free_chunk.as_mut() }.size() {
+                    (first_free_chunk, self.ptr_to_fd_of_fake_chunk())
+                } else {
+                    (self.fake_chunk_ptr(), self.fake_chunk.ptr_to_fd_of_bk)
+                }
+            }
+            // if the freelist is empty, put this chunk as the first chunk in the freelist.
+            None => (self.fake_chunk_ptr(), self.ptr_to_fd_of_fake_chunk()),
         }
     }
 
@@ -145,7 +173,10 @@ impl Allocator {
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
         let fake_chunk_ptr = self.fake_chunk_ptr();
-        let mut cur_chunk_ptr = self.first_free_chunk();
+        let mut cur_chunk_ptr = match self.first_free_chunk() {
+            Some(ptr) => ptr,
+            None => return core::ptr::null_mut(),
+        };
 
         while cur_chunk_ptr != fake_chunk_ptr {
             let cur_chunk = cur_chunk_ptr.as_mut();
@@ -179,11 +210,9 @@ impl Allocator {
             (None, None) => {
                 // mark the chunk as free, and adds it to the start of the linked list of free
                 // chunks.
-                let _ = chunk.mark_as_free(
-                    self.first_free_chunk(),
-                    self.ptr_to_fd_of_fake_chunk(),
-                    self.heap_end_addr,
-                );
+                let (fd, bk) =
+                    self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(chunk.0.size());
+                let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
             }
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
@@ -455,11 +484,15 @@ impl Allocator {
                     // we must also update the next chunk of the free chunk that we create, because
                     // before creating this free chunk, its prev chunk was `chunk`, which is used,
                     // but now its prev is a free chunk.
+                    let end_padding_chunk_size = space_left_at_end - HEADER_SIZE;
+                    let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                        end_padding_chunk_size,
+                    );
                     let _ = FreeChunk::create_new_and_update_next_chunk(
                         new_end_addr,
-                        space_left_at_end - HEADER_SIZE,
-                        self.first_free_chunk(),
-                        self.ptr_to_fd_of_fake_chunk(),
+                        end_padding_chunk_size,
+                        fd,
+                        bk,
                         self.heap_end_addr,
                     );
 

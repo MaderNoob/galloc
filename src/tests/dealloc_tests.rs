@@ -196,9 +196,10 @@ fn dealloc_prev_free_next_free() {
 
     // make sure the allocator points to the first chunk in the linked list which
     // is the third chunk.
-    assert_eq!(guard.allocator.first_free_chunk(), unsafe {
-        NonNull::new_unchecked(third_chunk as *mut _)
-    });
+    assert_eq!(
+        guard.allocator.first_free_chunk(),
+        Some(unsafe { NonNull::new_unchecked(third_chunk as *mut _) })
+    );
     assert_eq!(
         guard.allocator.fake_chunk.ptr_to_fd_of_bk,
         &mut first_chunk.fd as *mut _
