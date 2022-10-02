@@ -4,6 +4,7 @@ use crate::{divisible_by_4_usize::DivisbleBy4Usize, HEADER_SIZE, USIZE_SIZE};
 
 /// A chunk in the heap.
 #[repr(transparent)]
+#[derive(Debug)]
 pub struct Chunk(DivisbleBy4Usize);
 
 impl Chunk {
@@ -266,6 +267,7 @@ impl UsedChunk {
 
 /// A free chunk in the heap.
 #[repr(C)]
+#[derive(Debug)]
 pub struct FreeChunk {
     pub(crate) header: Chunk,
     pub(crate) fd: FreeChunkPtr,

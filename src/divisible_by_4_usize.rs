@@ -1,6 +1,7 @@
 /// A usize that is guaranteed to be divisible by 4, which allows storing 2
 /// additional bits of information in it.
 #[repr(transparent)]
+#[derive(Debug)]
 pub struct DivisbleBy4Usize(usize);
 
 impl DivisbleBy4Usize {

@@ -152,52 +152,22 @@ impl AllocatorInitGuard {
         }
     }
 
-    /// Initializes the heap allocator and returns a guard for it.
+    /// Initializes the heap allocator.
     fn init(&mut self, mem_size: usize) {
+        // make sure to align the allocation to the alignment of the heap allocator.
+        self.init_with_alignment(mem_size, MIN_ALIGNMENT);
+    }
+
+    /// Initializes the heap allocator, such that the heap start address is
+    /// aligned to the given alignment.
+    fn init_with_alignment(&mut self, mem_size: usize, alignment: usize) {
         // allocate enough size, make sure to align the allocation to the alignment of
         // the heap allocator.
-        self.layout = Layout::from_size_align(mem_size, MIN_ALIGNMENT).unwrap();
+        self.layout = Layout::from_size_align(mem_size, alignment).unwrap();
 
         self.addr = unsafe { std::alloc::alloc(self.layout) as usize };
 
         unsafe { self.allocator.init(self.addr, mem_size) }
-    }
-
-    /// Initializes the allocator and makes sure that calling alloc with an
-    /// alignment greater than `MIN_ALIGNMENT` won't be aligned.
-    ///
-    /// Returns the actual mem size of the memory region.
-    fn init_unaligned(&mut self, mem_size: usize) -> usize {
-        // allocate enough size, make sure to align the allocation to the alignment of
-        // the heap allocator.
-        self.layout = Layout::from_size_align(mem_size, MIN_ALIGNMENT).unwrap();
-
-        let raw_addr = unsafe { std::alloc::alloc(self.layout) as usize };
-
-        let alignment = MIN_ALIGNMENT * 2;
-
-        // sometimes by accident, `addr+HEADER_SIZE`, which is where our chunk's content
-        // will be, will be aligned to the chosen `alignment`, which is not what we want
-        // because we want the content to be unaligned in order for a start padding
-        // chunk to be created.
-        //
-        // so if `addr+HEADER_SIZE` is already aligned, we just add `MIN_ALIGNMENT` to
-        // `addr`, and we will thus make sure that `addr+HEADER_SIZE` is now not
-        // aligned.
-        let (addr, mem_size) = if unsafe { is_aligned(raw_addr + HEADER_SIZE, alignment) } {
-            // if the content address is aligned, change addr to make sure it is not
-            // aligned, but make sure to adjust the mem size accordingly.
-            (raw_addr + MIN_ALIGNMENT, mem_size - MIN_ALIGNMENT)
-        } else {
-            // the content address is not aligned, no need to change addr and mem size
-            (raw_addr, mem_size)
-        };
-
-        self.addr = addr;
-
-        unsafe { self.allocator.init(addr, mem_size) }
-
-        mem_size
     }
 
     /// Returns the address of the allocated heap memory region.

@@ -93,8 +93,8 @@ impl Allocator {
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             aligned_heap_start_addr,
             aligned_size - HEADER_SIZE,
-            NonNull::new_unchecked(&mut self.fake_chunk),
-            &mut self.fake_chunk.fd,
+            self.fake_chunk_ptr(),
+            self.ptr_to_fd_of_fake_chunk(),
         );
 
         // update the heap end address.
@@ -131,7 +131,8 @@ impl Allocator {
         }
     }
 
-    /// Returns fd and bk pointers for inserting a new free chunk to the freelist.
+    /// Returns fd and bk pointers for inserting a new free chunk to the
+    /// freelist.
     fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
         &mut self,
         chunk_size: usize,
@@ -149,7 +150,7 @@ impl Allocator {
                 } else {
                     (self.fake_chunk_ptr(), self.fake_chunk.ptr_to_fd_of_bk)
                 }
-            }
+            },
             // if the freelist is empty, put this chunk as the first chunk in the freelist.
             None => (self.fake_chunk_ptr(), self.ptr_to_fd_of_fake_chunk()),
         }
@@ -180,17 +181,22 @@ impl Allocator {
 
         while cur_chunk_ptr != fake_chunk_ptr {
             let cur_chunk = cur_chunk_ptr.as_mut();
-            if is_aligned(cur_chunk.content_addr(), layout_align) {
-                // already aligned
-                if let Some(ptr) = self.alloc_aligned(layout_size, cur_chunk_ptr.as_mut()) {
-                    return ptr.as_ptr();
-                }
-            } else {
-                // the chunk is not aligned
-                if let Some(ptr) =
-                    self.alloc_unaligned(layout_size, layout_align, cur_chunk_ptr.as_mut())
-                {
-                    return ptr.as_ptr();
+
+            // check if the chunk is large enough
+            if cur_chunk.size() >= layout_size {
+                // SAFETY: we know that the chunk is large enough
+                if is_aligned(cur_chunk.content_addr(), layout_align) {
+                    // already aligned
+                    if let Some(ptr) = self.alloc_aligned(layout_size, cur_chunk_ptr.as_mut()) {
+                        return ptr.as_ptr();
+                    }
+                } else {
+                    // the chunk is not aligned
+                    if let Some(ptr) =
+                        self.alloc_unaligned(layout_size, layout_align, cur_chunk_ptr.as_mut())
+                    {
+                        return ptr.as_ptr();
+                    }
                 }
             }
 
@@ -213,7 +219,7 @@ impl Allocator {
                 let (fd, bk) =
                     self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(chunk.0.size());
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
-            }
+            },
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -233,7 +239,7 @@ impl Allocator {
                     next_chunk_free.fd,
                     next_chunk_free.ptr_to_fd_of_bk,
                 );
-            }
+            },
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it
@@ -248,7 +254,7 @@ impl Allocator {
                 if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            }
+            },
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -273,7 +279,7 @@ impl Allocator {
                         + HEADER_SIZE
                         + next_chunk_free.size(),
                 );
-            }
+            },
         }
     }
 
@@ -357,7 +363,7 @@ impl Allocator {
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            }
+            },
         };
 
         // calculate the new end addresss of the chunk.
@@ -471,7 +477,7 @@ impl Allocator {
 
                 // we have successfully shrinked the chunk in place.
                 true
-            }
+            },
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -507,7 +513,7 @@ impl Allocator {
                     // little bit of memory (up to 32 bytes).
                     true
                 }
-            }
+            },
         }
     }
 
@@ -523,25 +529,28 @@ impl Allocator {
         layout_align: usize,
         cur_chunk: FreeChunkRef,
     ) -> Option<NonNull<u8>> {
-        // find an aligned start address which leaves enough space for a free chunk of
-        // padding plus a header for the created chunk before the content chunk that is
-        // returned to the user.
-        let aligned_content_start_addr = align_up(
-            cur_chunk.addr() + MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER + HEADER_SIZE,
-            layout_align,
-        );
+        // find an aligned start address starting from the end of the chunk which leaves
+        // enough space for the content to fit.
+        let aligned_content_start_addr =
+            align_down(cur_chunk.end_addr() - layout_size, layout_align);
 
         let aligned_start_addr = aligned_content_start_addr - HEADER_SIZE;
+
+        // make sure that after aligning the start address, there is enough space left
+        // at the start of `cur_chunk` to store a free chunk there.
+        //
+        // note that we must store a chunk there because there's no way that the
+        // `aligned_start_addr` fits exactly into `cur_chunk`, otherwise alloc aligned
+        // would have been called, so there must be space left at the start.
+        let space_left_at_start = aligned_start_addr.saturating_sub(cur_chunk.addr());
+        if space_left_at_start < MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
+            return None;
+        }
 
         // calculate the size left from the aligned start addr to the end of the chunk.
         let left_size = cur_chunk
             .end_addr()
             .saturating_sub(aligned_content_start_addr);
-
-        if left_size < layout_size {
-            // chunk is not big enough
-            return None;
-        }
 
         // shrink the current chunk to leave some space for the new aligned allocated
         // chunk.
@@ -698,18 +707,14 @@ impl Allocator {
     ///
     /// # Safety
     ///
-    /// The provided size must have been prepared.
+    /// The provided size must have been prepared, and the provided chunk must
+    /// be large enough to fit the allocation.
     unsafe fn alloc_aligned(
         &mut self,
         layout_size: usize,
         cur_chunk: FreeChunkRef,
     ) -> Option<NonNull<u8>> {
         let cur_chunk_size = cur_chunk.size();
-
-        // first make sure that the chunk is big enough to hold the allocation.
-        if cur_chunk_size < layout_size {
-            return None;
-        }
 
         // check if we need any end padding
         let end_padding = cur_chunk_size - layout_size;
