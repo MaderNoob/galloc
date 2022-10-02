@@ -512,11 +512,30 @@ pub enum ChunkRef {
     Free(FreeChunkRef),
 }
 
-// /// A fake free chunk, which only has fd and bk pointers, and cannot be used
-// for /// allocations.
-// ///
-// /// This is used for bins.
-// #[repr(C)]
-// pub struct FakeFreeChunk {
+/// A fake free chunk, which only has fd and bk pointers, and cannot be used for
+/// allocations.
+///
+/// This is used for bins which require a circular doubly linked list.
+#[repr(C)]
+pub struct FakeFreeChunk {
+    pub(crate) fd: Option<FreeChunkPtr>,
+    pub(crate) ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+}
 
-// }
+impl FakeFreeChunk {
+    /// Returns a fake `FreeChunkPtr` for this chunk.
+    ///
+    /// # Safety
+    ///
+    /// This chunk is missing the chunk header, so when using it as a free
+    /// chunk, you must make sure that you never access its header.
+    pub unsafe fn free_chunk_ptr(&self) -> FreeChunkPtr {
+        const OFFSET_OF_FD_IN_FREE_CHUNK: usize = USIZE_SIZE;
+
+        unsafe {
+            NonNull::new_unchecked(
+                (self as *const _ as usize - OFFSET_OF_FD_IN_FREE_CHUNK) as *mut _,
+            )
+        }
+    }
+}

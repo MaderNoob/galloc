@@ -178,7 +178,7 @@ fn dealloc_prev_free_next_free() {
     // allocator, and before it comes the third.
     assert_eq!(
         first_chunk.fd,
-        Some(guard.allocator.fake_chunk_of_other_bin_ptr())
+        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
     );
     assert_eq!(first_chunk.ptr_to_fd_of_bk, (&mut third_chunk.fd) as *mut _,);
 
@@ -205,7 +205,7 @@ fn dealloc_prev_free_next_free() {
         Some(unsafe { NonNull::new_unchecked(third_chunk as *mut _) })
     );
     assert_eq!(
-        guard.allocator.fake_chunk.ptr_to_fd_of_bk,
+        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
         &mut first_chunk.fd as *mut _
     );
 

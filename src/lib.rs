@@ -31,7 +31,7 @@ const CHUNK_SIZE_ALIGNMENT: usize = if MIN_ALIGNMENT < 4 { 4 } else { MIN_ALIGNM
 /// A linked list memory allocator.
 pub struct Allocator {
     heap_end_addr: usize,
-    fake_chunk: FreeChunk,
+    fake_chunk_of_other_bin: FakeFreeChunk,
 }
 impl Allocator {
     /// Creates an empty heap allocator without any heap memory region, which
@@ -41,8 +41,7 @@ impl Allocator {
     pub const fn empty() -> Self {
         Self {
             heap_end_addr: 0,
-            fake_chunk: FreeChunk {
-                header: unsafe { Chunk::new_unchecked(CHUNK_SIZE_ALIGNMENT, true, true) },
+            fake_chunk_of_other_bin: FakeFreeChunk {
                 fd: None,
                 ptr_to_fd_of_bk: core::ptr::null_mut(),
             },
@@ -102,14 +101,19 @@ impl Allocator {
     }
 
     /// Returns a pointer to the fake chunk of the other bin.
-    fn fake_chunk_of_other_bin_ptr(&self) -> FreeChunkPtr {
-        unsafe { NonNull::new_unchecked((&self.fake_chunk) as *const _ as *mut _) }
+    ///
+    /// # Safety
+    ///
+    /// This chunk is missing the chunk header, so when using it as a free
+    /// chunk, you must make sure that you never access its header.
+    unsafe fn fake_chunk_of_other_bin_ptr(&self) -> FreeChunkPtr {
+        unsafe { self.fake_chunk_of_other_bin.free_chunk_ptr() }
     }
 
     /// Returns a pointer to the first free chunk in the other bin, if any.
     fn first_free_chunk_in_other_bin(&self) -> Option<FreeChunkPtr> {
-        let fd_of_fake_chunk = self.fake_chunk.fd?;
-        if fd_of_fake_chunk == self.fake_chunk_of_other_bin_ptr() {
+        let fd_of_fake_chunk = self.fake_chunk_of_other_bin.fd?;
+        if fd_of_fake_chunk == unsafe { self.fake_chunk_of_other_bin_ptr() } {
             return None;
         }
 
@@ -118,7 +122,7 @@ impl Allocator {
 
     /// Returns a pointer to the fd of the fake chunk of the other bin.
     fn ptr_to_fd_of_fake_chunk_of_other_bin(&mut self) -> *mut Option<FreeChunkPtr> {
-        &mut self.fake_chunk.fd
+        &mut self.fake_chunk_of_other_bin.fd
     }
 
     /// Prepares an allocation size according to the requirements of
@@ -153,14 +157,20 @@ impl Allocator {
                     )
                 } else {
                     (
-                        Some(self.fake_chunk_of_other_bin_ptr()),
-                        self.fake_chunk.ptr_to_fd_of_bk,
+                        // SAFETY: this will be used as the fd of some other chunk, but chunks
+                        // never access the header of their fd, only their fd and bk, so this is
+                        // safe.
+                        Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
+                        self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
             },
             // if the freelist is empty, put this chunk as the first chunk in the freelist.
             None => (
-                Some(self.fake_chunk_of_other_bin_ptr()),
+                // SAFETY: this will be used as the fd of some other chunk, but chunks
+                // never access the header of their fd, only their fd and bk, so this is
+                // safe.
+                Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
                 self.ptr_to_fd_of_fake_chunk_of_other_bin(),
             ),
         }
