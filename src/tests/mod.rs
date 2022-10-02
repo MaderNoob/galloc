@@ -116,17 +116,20 @@ fn assert_only_1_free_chunk(guard: &mut AllocatorInitGuard, mem_size: usize) {
     assert_eq!(free_chunk.size(), mem_size - HEADER_SIZE);
 
     // it is the only free chunk, so it points back to the allocator
-    assert_eq!(free_chunk.fd, guard.allocator.fake_chunk_ptr());
+    assert_eq!(
+        free_chunk.fd,
+        Some(guard.allocator.fake_chunk_of_other_bin_ptr())
+    );
 
     // it is the only free chunk, so back should point to the allocator
     assert_eq!(
         free_chunk.ptr_to_fd_of_bk,
-        guard.allocator.ptr_to_fd_of_fake_chunk(),
+        guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
     );
 
     // make sure the allocator points to that free chunk
     assert_eq!(
-        guard.allocator.first_free_chunk(),
+        guard.allocator.first_free_chunk_in_other_bin(),
         Some(unsafe { NonNull::new_unchecked(free_chunk as *mut _) })
     );
     assert_eq!(

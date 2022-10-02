@@ -43,7 +43,7 @@ impl Allocator {
             heap_end_addr: 0,
             fake_chunk: FreeChunk {
                 header: unsafe { Chunk::new_unchecked(CHUNK_SIZE_ALIGNMENT, true, true) },
-                fd: NonNull::dangling(),
+                fd: None,
                 ptr_to_fd_of_bk: core::ptr::null_mut(),
             },
         }
@@ -93,30 +93,31 @@ impl Allocator {
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             aligned_heap_start_addr,
             aligned_size - HEADER_SIZE,
-            self.fake_chunk_ptr(),
-            self.ptr_to_fd_of_fake_chunk(),
+            Some(self.fake_chunk_of_other_bin_ptr()),
+            self.ptr_to_fd_of_fake_chunk_of_other_bin(),
         );
 
         // update the heap end address.
         self.heap_end_addr = aligned_heap_end_addr;
     }
 
-    /// Returns a pointer to the fake chunk.
-    fn fake_chunk_ptr(&self) -> FreeChunkPtr {
+    /// Returns a pointer to the fake chunk of the other bin.
+    fn fake_chunk_of_other_bin_ptr(&self) -> FreeChunkPtr {
         unsafe { NonNull::new_unchecked((&self.fake_chunk) as *const _ as *mut _) }
     }
 
-    /// Returns a pointer to the first free chunk, if any.
-    fn first_free_chunk(&self) -> Option<FreeChunkPtr> {
-        if self.fake_chunk.fd == self.fake_chunk_ptr() {
+    /// Returns a pointer to the first free chunk in the other bin, if any.
+    fn first_free_chunk_in_other_bin(&self) -> Option<FreeChunkPtr> {
+        let fd_of_fake_chunk = self.fake_chunk.fd?;
+        if fd_of_fake_chunk == self.fake_chunk_of_other_bin_ptr() {
             return None;
         }
 
-        Some(self.fake_chunk.fd)
+        Some(fd_of_fake_chunk)
     }
 
-    /// Returns a pointer to the fd of the fake chunk.
-    fn ptr_to_fd_of_fake_chunk(&mut self) -> *mut FreeChunkPtr {
+    /// Returns a pointer to the fd of the fake chunk of the other bin.
+    fn ptr_to_fd_of_fake_chunk_of_other_bin(&mut self) -> *mut Option<FreeChunkPtr> {
         &mut self.fake_chunk.fd
     }
 
@@ -136,8 +137,8 @@ impl Allocator {
     fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
         &mut self,
         chunk_size: usize,
-    ) -> (FreeChunkPtr, *mut FreeChunkPtr) {
-        match self.first_free_chunk() {
+    ) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
+        match self.first_free_chunk_in_other_bin() {
             // if the freelist is not empty
             Some(mut first_free_chunk) => {
                 // check if the given chunk size is bigger than the current first chunk,
@@ -146,13 +147,22 @@ impl Allocator {
                 // otherwise if the given chunk is smaller than the current first chunk,
                 // then put the given chunk at the end of the freelist.
                 if chunk_size > unsafe { first_free_chunk.as_mut() }.size() {
-                    (first_free_chunk, self.ptr_to_fd_of_fake_chunk())
+                    (
+                        Some(first_free_chunk),
+                        self.ptr_to_fd_of_fake_chunk_of_other_bin(),
+                    )
                 } else {
-                    (self.fake_chunk_ptr(), self.fake_chunk.ptr_to_fd_of_bk)
+                    (
+                        Some(self.fake_chunk_of_other_bin_ptr()),
+                        self.fake_chunk.ptr_to_fd_of_bk,
+                    )
                 }
             },
             // if the freelist is empty, put this chunk as the first chunk in the freelist.
-            None => (self.fake_chunk_ptr(), self.ptr_to_fd_of_fake_chunk()),
+            None => (
+                Some(self.fake_chunk_of_other_bin_ptr()),
+                self.ptr_to_fd_of_fake_chunk_of_other_bin(),
+            ),
         }
     }
 
@@ -173,13 +183,15 @@ impl Allocator {
 
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
-        let fake_chunk_ptr = self.fake_chunk_ptr();
-        let mut cur_chunk_ptr = match self.first_free_chunk() {
-            Some(ptr) => ptr,
-            None => return core::ptr::null_mut(),
-        };
+        let fake_chunk_ptr = self.fake_chunk_of_other_bin_ptr();
+        let mut maybe_cur_chunk_ptr = self.first_free_chunk_in_other_bin();
 
-        while cur_chunk_ptr != fake_chunk_ptr {
+        while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
+            // if the current chunk is the fake chunk of the other bin, we reached the end
+            // of the list.
+            if cur_chunk_ptr == fake_chunk_ptr {
+                break;
+            }
             let cur_chunk = cur_chunk_ptr.as_mut();
 
             // check if the chunk is large enough
@@ -200,7 +212,7 @@ impl Allocator {
                 }
             }
 
-            cur_chunk_ptr = cur_chunk.fd();
+            maybe_cur_chunk_ptr = cur_chunk.fd();
         }
 
         core::ptr::null_mut()

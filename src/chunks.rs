@@ -219,8 +219,8 @@ impl UsedChunk {
     /// correct.
     pub unsafe fn mark_as_free_without_updating_next_chunk(
         &mut self,
-        mut fd: FreeChunkPtr,
-        ptr_to_fd_of_bk: *mut FreeChunkPtr,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
     ) -> FreeChunkRef {
         self.0.set_is_free(true);
 
@@ -235,11 +235,13 @@ impl UsedChunk {
         // update the freelist.
         //
         // make `fd` point back to this chunk
-        let fd_ref = fd.as_mut();
-        fd_ref.ptr_to_fd_of_bk = &mut as_free_chunk.fd;
+        if let Some(mut fd) = fd {
+            let fd_ref = fd.as_mut();
+            fd_ref.ptr_to_fd_of_bk = &mut as_free_chunk.fd;
+        }
 
         // make `bk` point to this chunk
-        *ptr_to_fd_of_bk = FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _);
+        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(as_free_chunk.addr() as *mut _));
 
         as_free_chunk
     }
@@ -248,8 +250,8 @@ impl UsedChunk {
     /// into the linked list between fd and bk.
     pub fn mark_as_free(
         &mut self,
-        fd: FreeChunkPtr,
-        ptr_to_fd_of_bk: *mut FreeChunkPtr,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
         heap_end_addr: usize,
     ) -> FreeChunkRef {
         // SAFETY: we update the next chunk right after calling this.
@@ -270,10 +272,10 @@ impl UsedChunk {
 #[derive(Debug)]
 pub struct FreeChunk {
     pub(crate) header: Chunk,
-    pub(crate) fd: FreeChunkPtr,
+    pub(crate) fd: Option<FreeChunkPtr>,
 
     /// A pointer to the `fd` field of the back chunk.
-    pub(crate) ptr_to_fd_of_bk: *mut FreeChunkPtr,
+    pub(crate) ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
 }
 
 pub type FreeChunkRef = &'static mut FreeChunk;
@@ -311,22 +313,22 @@ impl FreeChunk {
     }
 
     /// Returns the fd pointer of this chunk.
-    pub fn fd(&mut self) -> FreeChunkPtr {
+    pub fn fd(&mut self) -> Option<FreeChunkPtr> {
         self.fd
     }
 
     /// Returns a mutable reference the fd pointer of this chunk.
-    pub fn fd_ref_mut(&mut self) -> &mut FreeChunkPtr {
+    pub fn fd_ref_mut(&mut self) -> &mut Option<FreeChunkPtr> {
         &mut self.fd
     }
 
     /// Returns a mutable reference to the fd chunk.
-    pub fn fd_chunk_ref(&mut self) -> FreeChunkRef {
-        unsafe { self.fd.as_mut() }
+    pub fn fd_chunk_ref(&mut self) -> Option<FreeChunkRef> {
+        Some(unsafe { self.fd?.as_mut() })
     }
 
     /// Returns a pointer to the fd of this chunk's bk chunk.
-    pub fn ptr_to_fd_of_bk(&mut self) -> *mut FreeChunkPtr {
+    pub fn ptr_to_fd_of_bk(&mut self) -> *mut Option<FreeChunkPtr> {
         self.ptr_to_fd_of_bk
     }
 
@@ -412,8 +414,8 @@ impl FreeChunk {
     pub unsafe fn create_new_without_updating_next_chunk(
         addr: usize,
         size: usize,
-        mut fd: FreeChunkPtr,
-        ptr_to_fd_of_bk: *mut FreeChunkPtr,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
     ) -> FreeChunkRef {
         let created_chunk_ref = FreeChunk::from_addr(addr);
 
@@ -432,11 +434,13 @@ impl FreeChunk {
         // update the freelist.
         //
         // make `fd` point back to this chunk
-        let fd_ref = fd.as_mut();
-        fd_ref.ptr_to_fd_of_bk = &mut created_chunk_ref.fd;
+        if let Some(mut fd) = fd {
+            let fd_ref = fd.as_mut();
+            fd_ref.ptr_to_fd_of_bk = &mut created_chunk_ref.fd;
+        }
 
         // make `bk` point to this chunk
-        *ptr_to_fd_of_bk = FreeChunkPtr::new_unchecked(addr as *mut _);
+        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(addr as *mut _));
 
         created_chunk_ref
     }
@@ -460,8 +464,8 @@ impl FreeChunk {
     pub unsafe fn create_new_and_update_next_chunk(
         addr: usize,
         size: usize,
-        fd: FreeChunkPtr,
-        ptr_to_fd_of_bk: *mut FreeChunkPtr,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
         heap_end_addr: usize,
     ) -> FreeChunkRef {
         // this is safe because right after it we update the next chunk
@@ -496,8 +500,9 @@ impl FreeChunk {
         *self.ptr_to_fd_of_bk = self.fd;
 
         // make fd point back to bk
-        let fd = self.fd_chunk_ref();
-        fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
+        if let Some(fd) = self.fd_chunk_ref() {
+            fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
+        }
     }
 }
 
@@ -506,3 +511,12 @@ pub enum ChunkRef {
     Used(UsedChunkRef),
     Free(FreeChunkRef),
 }
+
+// /// A fake free chunk, which only has fd and bk pointers, and cannot be used
+// for /// allocations.
+// ///
+// /// This is used for bins.
+// #[repr(C)]
+// pub struct FakeFreeChunk {
+
+// }

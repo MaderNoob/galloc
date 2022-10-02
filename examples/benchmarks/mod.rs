@@ -71,9 +71,8 @@ pub fn random_actions(duration: f32) -> usize {
         match action {
             0 => {
                 let size = rng.gen_range(100..=1000);
-                if let Some(allocation) =
-                    AllocationWrapper::new(size, std::mem::align_of::<usize>())
-                {
+                let alignment = 1 << rng.gen_range(0..=10);
+                if let Some(allocation) = AllocationWrapper::new(size, alignment) {
                     v.push(allocation)
                 }
             },
