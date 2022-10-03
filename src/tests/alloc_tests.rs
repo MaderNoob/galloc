@@ -190,7 +190,11 @@ fn alloc_aligned_end_padding() {
         Some(unsafe { NonNull::new_unchecked(end_padding_chunk as *mut _) })
     );
     assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
+        guard
+            .allocator
+            .selected_chunk_allocator
+            .fake_chunk_of_other_bin
+            .ptr_to_fd_of_bk,
         &mut end_padding_chunk.fd as *mut _
     )
 }
@@ -299,7 +303,11 @@ fn alloc_unaligned_no_end_padding() {
         Some(unsafe { NonNull::new_unchecked(addr as *mut _) })
     );
     assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
+        guard
+            .allocator
+            .selected_chunk_allocator
+            .fake_chunk_of_other_bin
+            .ptr_to_fd_of_bk,
         &mut start_padding_chunk.fd as *mut _
     );
 }
@@ -422,7 +430,11 @@ fn alloc_unaligned_end_padding() {
     );
 
     assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
+        guard
+            .allocator
+            .selected_chunk_allocator
+            .fake_chunk_of_other_bin
+            .ptr_to_fd_of_bk,
         &mut end_padding_chunk.fd as *mut _
     );
 }

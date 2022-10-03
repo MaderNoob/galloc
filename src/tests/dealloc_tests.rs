@@ -205,7 +205,11 @@ fn dealloc_prev_free_next_free() {
         Some(unsafe { NonNull::new_unchecked(third_chunk as *mut _) })
     );
     assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
+        guard
+            .allocator
+            .selected_chunk_allocator
+            .fake_chunk_of_other_bin
+            .ptr_to_fd_of_bk,
         &mut first_chunk.fd as *mut _
     );
 

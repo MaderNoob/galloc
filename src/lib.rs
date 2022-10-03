@@ -41,9 +41,8 @@ const_assert!(CHUNK_SIZE_ALIGNMENT >= 4);
 
 /// A linked list memory allocator.
 pub struct Allocator {
-    heap_end_addr: usize,
-    fake_chunk_of_other_bin: FakeFreeChunk,
     smallbins: SmallBins,
+    selected_chunk_allocator: SelectedChunkAllocator,
 }
 impl Allocator {
     /// Creates an empty heap allocator without any heap memory region, which
@@ -52,10 +51,12 @@ impl Allocator {
     /// To intiialize this allocator, use the `init` method.
     pub const fn empty() -> Self {
         Self {
-            heap_end_addr: 0,
-            fake_chunk_of_other_bin: FakeFreeChunk {
-                fd: None,
-                ptr_to_fd_of_bk: core::ptr::null_mut(),
+            selected_chunk_allocator: SelectedChunkAllocator {
+                heap_end_addr: 0,
+                fake_chunk_of_other_bin: FakeFreeChunk {
+                    fd: None,
+                    ptr_to_fd_of_bk: core::ptr::null_mut(),
+                },
             },
             smallbins: SmallBins::new(),
         }
@@ -64,7 +65,7 @@ impl Allocator {
     /// Checks if the heap memory region was already initialized by calling
     /// `init`.
     pub fn was_initialized(&self) -> bool {
-        self.heap_end_addr != 0
+        self.selected_chunk_allocator.heap_end_addr != 0
     }
 
     /// Initializes the heap allocator with the given memory region.
@@ -110,7 +111,7 @@ impl Allocator {
         );
 
         // update the heap end address.
-        self.heap_end_addr = aligned_heap_end_addr;
+        self.selected_chunk_allocator.heap_end_addr = aligned_heap_end_addr;
     }
 
     /// Returns a pointer to the fake chunk of the other bin.
@@ -120,12 +121,16 @@ impl Allocator {
     /// This chunk is missing the chunk header, so when using it as a free
     /// chunk, you must make sure that you never access its header.
     unsafe fn fake_chunk_of_other_bin_ptr(&self) -> FreeChunkPtr {
-        unsafe { self.fake_chunk_of_other_bin.free_chunk_ptr() }
+        unsafe {
+            self.selected_chunk_allocator
+                .fake_chunk_of_other_bin
+                .free_chunk_ptr()
+        }
     }
 
     /// Returns a pointer to the first free chunk in the other bin, if any.
     fn first_free_chunk_in_other_bin(&self) -> Option<FreeChunkPtr> {
-        let fd_of_fake_chunk = self.fake_chunk_of_other_bin.fd?;
+        let fd_of_fake_chunk = self.selected_chunk_allocator.fake_chunk_of_other_bin.fd?;
         if fd_of_fake_chunk == unsafe { self.fake_chunk_of_other_bin_ptr() } {
             return None;
         }
@@ -135,7 +140,7 @@ impl Allocator {
 
     /// Returns a pointer to the fd of the fake chunk of the other bin.
     fn ptr_to_fd_of_fake_chunk_of_other_bin(&mut self) -> *mut Option<FreeChunkPtr> {
-        &mut self.fake_chunk_of_other_bin.fd
+        &mut self.selected_chunk_allocator.fake_chunk_of_other_bin.fd
     }
 
     /// Prepares an allocation size according to the requirements of
@@ -174,7 +179,9 @@ impl Allocator {
                         // never access the header of their fd, only their fd and bk, so this is
                         // safe.
                         Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
-                        self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
+                        self.selected_chunk_allocator
+                            .fake_chunk_of_other_bin
+                            .ptr_to_fd_of_bk,
                     )
                 }
             },
@@ -206,13 +213,74 @@ impl Allocator {
 
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
-        let fake_chunk_ptr = self.fake_chunk_of_other_bin_ptr();
+        if let Some(ptr) = self.alloc_from_optimal_chunks(layout_size, layout_align) {
+            return ptr.as_ptr();
+        }
+
+        if let Some(ptr) = self.alloc_from_other_bin(layout_size, layout_align) {
+            return ptr.as_ptr();
+        }
+
+        if let Some(ptr) = self.alloc_from_suboptimal_chunks(layout_size, layout_align) {
+            return ptr.as_ptr();
+        }
+
+        core::ptr::null_mut()
+    }
+
+    /// Tries to allocate a chunk from the optimal chunks for the given
+    /// allocation requirements.
+    ///
+    /// # Safety
+    ///
+    /// The size and align must have been prepared.
+    unsafe fn alloc_from_optimal_chunks(
+        &mut self,
+        layout_size: usize,
+        layout_align: usize,
+    ) -> Option<NonNull<u8>> {
+        let alignment_index = SmallBins::alignment_index(layout_align);
+        let mut optimal_chunks =
+            self.smallbins
+                .optimal_chunks(layout_size, layout_align, alignment_index);
+        let mut optimal_chunk = optimal_chunks.next()?;
+        let chunk = optimal_chunk.ptr.as_mut();
+        if optimal_chunk.end_padding == 0 {
+            Some(
+                self.selected_chunk_allocator
+                    .alloc_aligned_no_end_padding(chunk),
+            )
+        } else {
+            Some(
+                self.selected_chunk_allocator
+                    .alloc_aligned_split_end_padding_chunk(
+                        layout_size,
+                        optimal_chunk.end_padding,
+                        chunk,
+                    ),
+            )
+        }
+    }
+
+    /// Tries to allocate a chunk from the other bin for the given allocation
+    /// requirements.
+    ///
+    /// # Safety
+    ///
+    /// The size and align must have been prepared.
+    unsafe fn alloc_from_other_bin(
+        &mut self,
+        layout_size: usize,
+        layout_align: usize,
+    ) -> Option<NonNull<u8>> {
+        // try to allocate from the other bin.
+        let fake_chunk_of_other_bin_ptr = self.fake_chunk_of_other_bin_ptr();
         let mut maybe_cur_chunk_ptr = self.first_free_chunk_in_other_bin();
 
         while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
             // if the current chunk is the fake chunk of the other bin, we reached the end
             // of the list.
-            if cur_chunk_ptr == fake_chunk_ptr {
+            if cur_chunk_ptr == fake_chunk_of_other_bin_ptr {
                 break;
             }
             let cur_chunk = cur_chunk_ptr.as_mut();
@@ -222,15 +290,20 @@ impl Allocator {
                 // SAFETY: we know that the chunk is large enough
                 if is_aligned(cur_chunk.content_addr(), layout_align) {
                     // already aligned
-                    if let Some(ptr) = self.alloc_aligned(layout_size, cur_chunk_ptr.as_mut()) {
-                        return ptr.as_ptr();
+                    if let Some(ptr) = self
+                        .selected_chunk_allocator
+                        .alloc_aligned(layout_size, cur_chunk_ptr.as_mut())
+                    {
+                        return Some(ptr);
                     }
                 } else {
                     // the chunk is not aligned
-                    if let Some(ptr) =
-                        self.alloc_unaligned(layout_size, layout_align, cur_chunk_ptr.as_mut())
-                    {
-                        return ptr.as_ptr();
+                    if let Some(ptr) = self.selected_chunk_allocator.alloc_unaligned(
+                        layout_size,
+                        layout_align,
+                        cur_chunk_ptr.as_mut(),
+                    ) {
+                        return Some(ptr);
                     }
                 }
             }
@@ -238,7 +311,32 @@ impl Allocator {
             maybe_cur_chunk_ptr = cur_chunk.fd();
         }
 
-        core::ptr::null_mut()
+        None
+    }
+
+    /// Tries to allocate a chunk from the sub-optimal chunks for the given
+    /// allocation requirements.
+    ///
+    /// This strategy should be called after trying the other bin.
+    ///
+    /// # Safety
+    ///
+    /// The size and align must have been prepared.
+    unsafe fn alloc_from_suboptimal_chunks(
+        &mut self,
+        layout_size: usize,
+        layout_align: usize,
+    ) -> Option<NonNull<u8>> {
+        for mut suboptimal_chunk_ptr in self.smallbins.suboptimal_chunks(layout_size) {
+            let chunk = suboptimal_chunk_ptr.as_mut();
+            if let Some(ptr) =
+                self.selected_chunk_allocator
+                    .alloc_unaligned(layout_size, layout_align, chunk)
+            {
+                return Some(ptr);
+            }
+        }
+        None
     }
 
     /// Deallocates memory.
@@ -246,14 +344,14 @@ impl Allocator {
         let chunk = UsedChunk::from_addr(ptr as usize - HEADER_SIZE);
         match (
             chunk.prev_chunk_if_free(),
-            chunk.next_chunk_if_free(self.heap_end_addr),
+            chunk.next_chunk_if_free(self.selected_chunk_allocator.heap_end_addr),
         ) {
             (None, None) => {
                 // mark the chunk as free, and adds it to the start of the linked list of free
                 // chunks.
                 let (fd, bk) =
                     self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(chunk.0.size());
-                let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
+                let _ = chunk.mark_as_free(fd, bk, self.selected_chunk_allocator.heap_end_addr);
             },
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
@@ -286,7 +384,10 @@ impl Allocator {
 
                 // we must also update the prev in use bit of the next chunk, if any, because
                 // its prev is now free.
-                if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
+                if let Some(next_chunk_addr) = chunk
+                    .0
+                    .next_chunk_addr(self.selected_chunk_allocator.heap_end_addr)
+                {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
             },
@@ -392,14 +493,15 @@ impl Allocator {
     unsafe fn try_grow_in_place(&self, chunk: UsedChunkRef, new_size: usize) -> bool {
         // to grow this chunk we need its next chunk to be free, make sure that the next
         // chunk is free.
-        let next_chunk_free = match chunk.next_chunk_if_free(self.heap_end_addr) {
-            Some(next_chunk_free) => next_chunk_free,
+        let next_chunk_free =
+            match chunk.next_chunk_if_free(self.selected_chunk_allocator.heap_end_addr) {
+                Some(next_chunk_free) => next_chunk_free,
 
-            // if the next chunk is not free, we can't grow this chunk in place.
-            None => {
-                return false;
-            },
-        };
+                // if the next chunk is not free, we can't grow this chunk in place.
+                None => {
+                    return false;
+                },
+            };
 
         // calculate the new end addresss of the chunk.
         let new_end_addr = chunk.content_addr() + new_size;
@@ -463,8 +565,9 @@ impl Allocator {
             // next chunk, because its prev is now `chunk`, which is in use,
             // while before calling this function its prev was
             // `next_chunk_free`, which is free.
-            if let Some(next_chunk_of_next_chunk_addr) =
-                next_chunk_free.header.next_chunk_addr(self.heap_end_addr)
+            if let Some(next_chunk_of_next_chunk_addr) = next_chunk_free
+                .header
+                .next_chunk_addr(self.selected_chunk_allocator.heap_end_addr)
             {
                 // its prev is now `chunk`, which is used.
                 Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_of_next_chunk_addr, true);
@@ -492,7 +595,7 @@ impl Allocator {
         // calculate the new end addresss of the chunk.
         let new_end_addr = chunk.content_addr() + new_size;
 
-        match chunk.next_chunk_if_free(self.heap_end_addr) {
+        match chunk.next_chunk_if_free(self.selected_chunk_allocator.heap_end_addr) {
             Some(next_chunk_free) => {
                 // if the next chunk is free, we can just move it back and shrink `chunk`.
                 // no need to update the next chunk, because it already knows that its prev
@@ -534,7 +637,7 @@ impl Allocator {
                         end_padding_chunk_size,
                         fd,
                         bk,
-                        self.heap_end_addr,
+                        self.selected_chunk_allocator.heap_end_addr,
                     );
 
                     // resize `chunk` to the desired size.
@@ -551,7 +654,18 @@ impl Allocator {
             },
         }
     }
+}
 
+unsafe impl Send for Allocator {}
+
+/// The allocator which can allocator chunks after a chunk was selected for
+/// allocation.
+struct SelectedChunkAllocator {
+    heap_end_addr: usize,
+    fake_chunk_of_other_bin: FakeFreeChunk,
+}
+
+impl SelectedChunkAllocator {
     /// Allocates an unaligned chunk by splitting a start padding chunk from it,
     /// and then proceeding as usual.
     ///
@@ -836,8 +950,6 @@ impl Allocator {
         NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8)
     }
 }
-
-unsafe impl Send for Allocator {}
 
 /// A spin locked memory allocator that can be used as the global allocator.
 #[cfg(feature = "spin")]
