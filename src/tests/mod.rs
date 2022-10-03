@@ -133,11 +133,7 @@ fn assert_only_1_free_chunk(guard: &mut AllocatorInitGuard, mem_size: usize) {
         Some(unsafe { NonNull::new_unchecked(free_chunk as *mut _) })
     );
     assert_eq!(
-        guard
-            .allocator
-            .selected_chunk_allocator
-            .fake_chunk_of_other_bin
-            .ptr_to_fd_of_bk,
+        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
         &mut free_chunk.fd as *mut _
     );
 }
