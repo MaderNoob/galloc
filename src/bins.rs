@@ -166,7 +166,6 @@ pub struct OptimalChunk {
 pub struct SmallBin {
     alignment_sub_bins: [AlignmentSubBin; ALIGNMENT_SUB_BINS_AMOUNT],
     contains_alignments_bitmap: ContainsAlignmentsBitmap,
-    largest_alignment: usize,
 }
 
 impl SmallBin {
@@ -175,7 +174,6 @@ impl SmallBin {
         Self {
             alignment_sub_bins: [AlignmentSubBin::new(); ALIGNMENT_SUB_BINS_AMOUNT],
             contains_alignments_bitmap: ContainsAlignmentsBitmap::new(),
-            largest_alignment: 0,
         }
     }
 }

@@ -213,16 +213,22 @@ impl Allocator {
 
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
-        if let Some(ptr) = self.alloc_from_optimal_chunks(layout_size, layout_align) {
-            return ptr.as_ptr();
+        let is_smallbin_size = SmallBins::is_smallbin_size(layout_size);
+
+        if is_smallbin_size {
+            if let Some(ptr) = self.alloc_from_optimal_chunks(layout_size, layout_align) {
+                return ptr.as_ptr();
+            }
         }
 
         if let Some(ptr) = self.alloc_from_other_bin(layout_size, layout_align) {
             return ptr.as_ptr();
         }
 
-        if let Some(ptr) = self.alloc_from_suboptimal_chunks(layout_size, layout_align) {
-            return ptr.as_ptr();
+        if is_smallbin_size {
+            if let Some(ptr) = self.alloc_from_suboptimal_chunks(layout_size, layout_align) {
+                return ptr.as_ptr();
+            }
         }
 
         core::ptr::null_mut()
@@ -233,7 +239,8 @@ impl Allocator {
     ///
     /// # Safety
     ///
-    /// The size and align must have been prepared.
+    ///  - The size and align must have been prepared.
+    ///  - The size must be the size of a small bin.
     unsafe fn alloc_from_optimal_chunks(
         &mut self,
         layout_size: usize,
@@ -321,7 +328,8 @@ impl Allocator {
     ///
     /// # Safety
     ///
-    /// The size and align must have been prepared.
+    ///  - The size and align must have been prepared.
+    ///  - The size must be the size of a small bin.
     unsafe fn alloc_from_suboptimal_chunks(
         &mut self,
         layout_size: usize,
