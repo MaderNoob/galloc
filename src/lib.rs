@@ -5,6 +5,7 @@
 extern crate std;
 
 mod alignment;
+mod bins;
 mod chunks;
 mod divisible_by_4_usize;
 
@@ -14,24 +15,35 @@ mod tests;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alignment::*;
+use bins::SmallBins;
 use chunks::*;
+use static_assertions::const_assert;
 
 pub const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
 pub const USIZE_SIZE: usize = core::mem::size_of::<usize>();
-pub const MIN_ALIGNMENT: usize = USIZE_ALIGNMENT;
+pub const MIN_ALIGNMENT: usize = if USIZE_ALIGNMENT < 8 {
+    8
+} else {
+    USIZE_ALIGNMENT
+};
 pub const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize =
     core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
 pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 
-/// Chunk size must be divible by 4, even if `MIN_ALIGNMENT` is smaller than
-/// 4, but if `MIN_ALIGNMENT` is bigger than 4 then size must be a multiple of
-/// it.
-const CHUNK_SIZE_ALIGNMENT: usize = if MIN_ALIGNMENT < 4 { 4 } else { MIN_ALIGNMENT };
+// `CHUNK_SIZE_ALIGNMENT` is guaranteed to be larger than 4, because
+// `MIN_ALIGNMENT` is at least 8, so storing the size as a `DivisibleBy4Usize`
+// is safe.
+const CHUNK_SIZE_ALIGNMENT: usize = MIN_ALIGNMENT;
+
+// `CHUNK_SIZE_ALIGNMENT` must be larger than 4, so that storing the size as a
+// `DivisibleBy4Usize` is safe.
+const_assert!(CHUNK_SIZE_ALIGNMENT >= 4);
 
 /// A linked list memory allocator.
 pub struct Allocator {
     heap_end_addr: usize,
     fake_chunk_of_other_bin: FakeFreeChunk,
+    smallbins: SmallBins,
 }
 impl Allocator {
     /// Creates an empty heap allocator without any heap memory region, which
@@ -45,6 +57,7 @@ impl Allocator {
                 fd: None,
                 ptr_to_fd_of_bk: core::ptr::null_mut(),
             },
+            smallbins: SmallBins::new(),
         }
     }
 
