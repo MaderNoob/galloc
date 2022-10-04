@@ -149,20 +149,46 @@ impl Allocator {
         }
     }
 
+    /// Returns fd and bk pointers for inserting a new free chunk to its
+    /// matching bin.
+    ///
+    /// # Safety
+    ///
+    ///  - `chunk_size` must be the size of an actual chunk.
+    ///  - `chunk_content_binary_alignment` must be a power of 2.
+    unsafe fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+        &mut self,
+        chunk_size: usize,
+        alignment_index_of_chunk_content_addr: usize,
+    ) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
+        // SAFETY: this is safe because `chunk_size` is the size of an actual chunk, so
+        // it must have already been prepared.
+        if let Some(smallbin_index) = SmallBins::smallbin_index(chunk_size) {
+            self.smallbins
+                .get_fd_and_bk_pointers_for_inserting_to_smallbin(
+                    smallbin_index,
+                    alignment_index_of_chunk_content_addr,
+                )
+        } else {
+            // if this chunk does not fit in the smallbins, put it in the other bin
+            self.get_fd_and_bk_pointers_for_inserting_new_free_chunk_in_other_bin(chunk_size)
+        }
+    }
+
     /// Returns fd and bk pointers for inserting a new free chunk to the
-    /// freelist.
-    fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+    /// other bin.
+    fn get_fd_and_bk_pointers_for_inserting_new_free_chunk_in_other_bin(
         &mut self,
         chunk_size: usize,
     ) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
         match self.first_free_chunk_in_other_bin() {
-            // if the freelist is not empty
+            // if the other bin is not empty
             Some(mut first_free_chunk) => {
                 // check if the given chunk size is bigger than the current first chunk,
-                // and if so, put the given chunk at the start of the freelist.
+                // and if so, put the given chunk at the start of the bin.
                 //
                 // otherwise if the given chunk is smaller than the current first chunk,
-                // then put the given chunk at the end of the freelist.
+                // then put the given chunk at the end of the bin.
                 if chunk_size > unsafe { first_free_chunk.as_mut() }.size() {
                     (
                         Some(first_free_chunk),
@@ -170,19 +196,18 @@ impl Allocator {
                     )
                 } else {
                     (
-                        // SAFETY: this will be used as the fd of some other chunk, but chunks
-                        // never access the header of their fd, only their fd and bk, so this is
-                        // safe.
+                        // SAFETY: the fake chunkwill be used as the fd of some other chunk, but
+                        // chunks never access the header of their fd, only their fd and bk, so
+                        // this is safe.
                         Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
                         self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
             },
-            // if the freelist is empty, put this chunk as the first chunk in the freelist.
+            // if the other bin is empty, put this chunk as the first chunk in the bin.
             None => (
-                // SAFETY: this will be used as the fd of some other chunk, but chunks
-                // never access the header of their fd, only their fd and bk, so this is
-                // safe.
+                // SAFETY: the fake chunk will be used as the fd of some other chunk, but chunks
+                // never access the header of their fd, only their fd and bk, so this is safe.
                 Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
                 self.ptr_to_fd_of_fake_chunk_of_other_bin(),
             ),
@@ -352,8 +377,15 @@ impl Allocator {
             (None, None) => {
                 // mark the chunk as free, and adds it to the start of the linked list of free
                 // chunks.
-                let (fd, bk) =
-                    self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(chunk.0.size());
+                //
+                // SAFETY: the provided chunk size is the size of an actual chunk, and the
+                // alignment returned from `Chunk::alignment` is always a power of 2.
+                let (fd, bk) = unsafe {
+                    self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                        chunk.0.size(),
+                        SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
+                    )
+                };
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
             },
             (None, Some(next_chunk_free)) => {
@@ -627,9 +659,24 @@ impl Allocator {
                     // before creating this free chunk, its prev chunk was `chunk`, which is used,
                     // but now its prev is a free chunk.
                     let end_padding_chunk_size = space_left_at_end - HEADER_SIZE;
-                    let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-                        end_padding_chunk_size,
-                    );
+
+                    // calculate the content address of the end padding chunk so that we can
+                    // calculate the alignment index of its content.
+                    //
+                    // the end padding chunk starts right where the new end address is, and the
+                    // content comes right after the header.
+                    let end_padding_chunk_content_addr = new_end_addr + HEADER_SIZE;
+
+                    // SAFETY: the provided chunk size is the size of an actual chunk, and the
+                    // alignment returned from `Chunk::alignment` is always a power of 2.
+                    let (fd, bk) = unsafe {
+                        self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                            end_padding_chunk_size,
+                            SmallBins::alignment_index_of_chunk_content_addr(
+                                end_padding_chunk_content_addr,
+                            ),
+                        )
+                    };
                     let _ = FreeChunk::create_new_and_update_next_chunk(
                         new_end_addr,
                         end_padding_chunk_size,
@@ -903,7 +950,7 @@ impl Allocator {
     /// Allocates an aligned chunk without any end padding.
     fn alloc_aligned_no_end_padding(&mut self, cur_chunk: FreeChunkRef) -> NonNull<u8> {
         // mark the chunk as used and make the necessary updates
-        cur_chunk.mark_as_used_unlink(self.heap_end_addr);
+        cur_chunk.mark_as_used_unlink(self.heap_end_addr, &mut self.smallbins);
 
         // retrun the chunk to the user
         unsafe { NonNull::new_unchecked(cur_chunk.content_addr() as *mut u8) }

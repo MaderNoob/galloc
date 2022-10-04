@@ -1,6 +1,6 @@
 use core::ptr::NonNull;
 
-use crate::{divisible_by_4_usize::DivisbleBy4Usize, HEADER_SIZE, USIZE_SIZE};
+use crate::{bins::SmallBins, divisible_by_4_usize::DivisbleBy4Usize, HEADER_SIZE, USIZE_SIZE};
 
 /// A chunk in the heap.
 #[repr(transparent)]
@@ -385,13 +385,49 @@ impl FreeChunk {
     }
 
     /// Marks this free chunk as used, updates its next chunk, and unlinks this
-    /// chunk from the linked list of free chunks.
-    pub fn mark_as_used_unlink(&mut self, heap_end_addr: usize) -> UsedChunkRef {
+    /// chunk from the linked list of free chunks that it's in.
+    ///
+    /// If unlinking this chunk emptied the alignment sub-bin that this chunk
+    /// was in, updates the contains alignments bitmap of the smallbin to
+    /// indicate that.
+    pub fn mark_as_used_unlink(
+        &mut self,
+        heap_end_addr: usize,
+        smallbins: &mut SmallBins,
+    ) -> UsedChunkRef {
+        // remember if this chunk was the last chunk in the freelist.
+        //
+        // this can save us the part where we update the smallbin, because if we know
+        // that this chunk wasn't last, then there's no way that unlinking it emptied
+        // the sub-bin.
+        let was_last_chunk = self.fd.is_none();
+
         // this is safe because we then unlink it.
         let _ = unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) };
 
         // this is safe because the chunk will now be used.
         unsafe { self.unlink() };
+
+        // update the smallbins in case unlinking this chunk just emptied the sub-bin
+        // that it was in.
+        //
+        // if this chunk wasn't last, there's no way that unlinking it could have
+        // emptied the sub-bin.
+        if was_last_chunk {
+            // SAFETY: the given size is the size of an actual chunk, which must have
+            // already been prepared.
+            if let Some(smallbin_index) = unsafe { SmallBins::smallbin_index(self.size()) } {
+                let alignment_index = unsafe {
+                    // SAFETY: the provided content address is the content address of an actual
+                    // chunk, so it must be aligned.
+                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
+                };
+                smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
+                    smallbin_index,
+                    alignment_index,
+                );
+            }
+        }
 
         unsafe { core::mem::transmute(self) }
     }
@@ -485,7 +521,7 @@ impl FreeChunk {
     ///
     /// You must make sure to make use of this chunk and keep track of it, do
     /// not lose the memory.
-    pub unsafe fn unlink(&mut self) {
+    pub unsafe fn unlink(&mut self, smallbins: &mut SmallBins) {
         // unlink this chunk from the linked list of free chunks, to do that we
         // need to change the state:
         // ```
