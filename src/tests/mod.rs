@@ -96,13 +96,12 @@ fn random_alloc_dealloc_realloc() {
         }
 
         // make sure that the heap is only 1 big free chunk.
-        assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+        assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
     }
 }
 
-fn assert_only_1_free_chunk(guard: &mut AllocatorInitGuard, mem_size: usize) {
-    let addr = guard.addr();
-
+/// Asserts that there is only 1 free chunk in the bin of the chunk at the given addr.
+fn assert_only_1_free_chunk_in_bin(guard: &mut AllocatorInitGuard, addr: usize, size: usize) {
     let free_chunk = unsafe {
         match Chunk::from_addr(addr) {
             ChunkRef::Used(_) => panic!("first chunk in heap is marked used after dealloc"),
@@ -113,33 +112,69 @@ fn assert_only_1_free_chunk(guard: &mut AllocatorInitGuard, mem_size: usize) {
     // the first chunk's prev in use flag must be `true`.
     assert_eq!(free_chunk.header.prev_in_use(), true);
 
-    assert_eq!(free_chunk.size(), mem_size - HEADER_SIZE);
+    assert_eq!(free_chunk.size(), size);
+
+    // find the desired fd and bk of the free chunk.
+    let (fd, bk) = get_expected_fd_and_bk_for_chunk_with_size(
+        free_chunk.size(),
+        free_chunk.content_addr(),
+        guard,
+    );
 
     // it is the only free chunk, so it points back to the allocator
-    assert_eq!(
-        free_chunk.fd,
-        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
-    );
+    assert_eq!(free_chunk.fd, fd);
 
     // it is the only free chunk, so back should point to the allocator
-    assert_eq!(
-        free_chunk.ptr_to_fd_of_bk,
-        guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
-    );
+    assert_eq!(free_chunk.ptr_to_fd_of_bk, bk);
 
-    // make sure the allocator points to that free chunk
+    // make sure fd points back to free chunk
+    if let Some(mut fd_ptr) = fd {
+        let fd_ref = unsafe { fd_ptr.as_mut() };
+        assert_eq!(fd_ref.ptr_to_fd_of_bk, &mut free_chunk.fd as *mut _)
+    }
+
+    // make sure bk points to the free chunk.
     assert_eq!(
-        guard.allocator.first_free_chunk_in_other_bin(),
+        unsafe { *bk },
         Some(unsafe { NonNull::new_unchecked(free_chunk as *mut _) })
     );
-    assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
-        &mut free_chunk.fd as *mut _
-    );
+}
+
+/// Asserts that there is only 1 free chunk.
+fn assert_only_1_free_chunk_which_is_at_heap_start(
+    guard: &mut AllocatorInitGuard,
+    mem_size: usize,
+) {
+    assert_only_1_free_chunk_in_bin(guard, guard.addr(), mem_size - HEADER_SIZE)
+}
+
+/// Returns the expected fd and bk for a chunk with the given size and content address, assuming that it's the only free chunk in its bin.
+fn get_expected_fd_and_bk_for_chunk_with_size(
+    size: usize,
+    content_addr: usize,
+    guard: &mut AllocatorInitGuard,
+) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
+    match unsafe { SmallBins::smallbin_index(size) } {
+        Some(smallbin_index) => {
+            let alignment_index =
+                unsafe { SmallBins::alignment_index_of_chunk_content_addr(content_addr) };
+            let sub_bin = &mut guard.allocator.smallbins.small_bins[smallbin_index]
+                .alignment_sub_bins[alignment_index];
+            (None, &mut sub_bin.fd as *mut _)
+        }
+        None => {
+            // the chunk is in the other bin
+            (
+                Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() }),
+                guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
+            )
+        }
+    }
 }
 
 /// A guard that initializes the allocator with a region of memory on
 /// creation, and frees that memory when dropped.
+#[derive(Debug)]
 struct AllocatorInitGuard {
     addr: usize,
     layout: Layout,

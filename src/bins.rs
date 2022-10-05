@@ -22,7 +22,8 @@ pub const MAX_ALIGNMENT_INDEX: usize = ALIGNMENT_SUB_BINS_AMOUNT - 1;
 type AlignmentSubBinsBitmapType = u8;
 
 const SMALLEST_SMALLBIN_SIZE: usize = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
-const LARGEST_SMALLBIN_SIZE: usize = SMALLEST_SMALLBIN_SIZE + SMALLBINS_AMOUNT * MIN_ALIGNMENT;
+const LARGEST_SMALLBIN_SIZE: usize =
+    SMALLEST_SMALLBIN_SIZE + (SMALLBINS_AMOUNT - 1) * MIN_ALIGNMENT;
 
 const OPTIMAL_SMALLBIN_LOOKAHEAD: usize = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER / MIN_ALIGNMENT;
 
@@ -47,8 +48,9 @@ pub const unsafe fn log2_of_power_of_2(x: usize) -> usize {
 }
 
 /// A collection of small bins, used in the allocator.
+#[derive(Debug)]
 pub struct SmallBins {
-    small_bins: [SmallBin; SMALLBINS_AMOUNT],
+    pub(crate) small_bins: [SmallBin; SMALLBINS_AMOUNT],
 }
 
 impl SmallBins {
@@ -65,7 +67,7 @@ impl SmallBins {
     ///
     /// The size must have been prepared.
     pub unsafe fn is_smallbin_size(size: usize) -> bool {
-        size < LARGEST_SMALLBIN_SIZE
+        size <= LARGEST_SMALLBIN_SIZE
     }
 
     /// Returns the index of the smallbin containing chunks of the given size,
@@ -75,7 +77,7 @@ impl SmallBins {
     ///
     /// The size must have been prepared.
     pub unsafe fn smallbin_index(size: usize) -> Option<usize> {
-        if size < LARGEST_SMALLBIN_SIZE {
+        if size > LARGEST_SMALLBIN_SIZE {
             return None;
         }
 
@@ -92,7 +94,7 @@ impl SmallBins {
             return MAX_ALIGNMENT_INDEX;
         }
 
-        log2_of_power_of_2(alignment)
+        log2_of_power_of_2(alignment) - MIN_ALIGNMENT_LOG2
     }
 
     /// Returns the alignment index for the chunk content addr.
@@ -181,11 +183,6 @@ impl SmallBins {
             .filter_map(move |sub_bin| sub_bin.fd)
     }
 
-    /// Calculates the alignment corresponding to the given alignment index.
-    fn alignment_of_alignment_index(alignment_index: usize) -> usize {
-        1 << (alignment_index + MIN_ALIGNMENT_LOG2)
-    }
-
     /// Returns fd and bk pointers for inserting a free chunk into the smallbin
     /// with the given index, and in it, into the sub-bin with the given
     /// alignment index.
@@ -211,7 +208,7 @@ impl SmallBins {
             .contains_alignments_bitmap
             .set_contains_alignment(alignment_index);
 
-        let mut alignment_sub_bin = smallbin.alignment_sub_bins[alignment_index];
+        let alignment_sub_bin = &mut smallbin.alignment_sub_bins[alignment_index];
 
         (alignment_sub_bin.fd, &mut alignment_sub_bin.fd)
     }
@@ -245,10 +242,10 @@ pub struct OptimalChunk {
 }
 
 /// A small bin, which is made up of alignment sub-bins.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SmallBin {
-    alignment_sub_bins: [AlignmentSubBin; ALIGNMENT_SUB_BINS_AMOUNT],
-    contains_alignments_bitmap: ContainsAlignmentsBitmap,
+    pub(crate) alignment_sub_bins: [AlignmentSubBin; ALIGNMENT_SUB_BINS_AMOUNT],
+    pub(crate) contains_alignments_bitmap: ContainsAlignmentsBitmap,
 }
 
 impl SmallBin {
@@ -269,10 +266,10 @@ impl Default for SmallBin {
 
 /// An alignment sub-bin, which is a linked list of chunks with the same size
 /// and alignment.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AlignmentSubBin {
     /// A pointer to the first chunk in the bin, if any.
-    fd: Option<FreeChunkPtr>,
+    pub(crate) fd: Option<FreeChunkPtr>,
 }
 
 impl AlignmentSubBin {
@@ -290,7 +287,7 @@ impl Default for AlignmentSubBin {
 
 /// A bitmap which tells us whether the bin that this bitmap belongs to contains
 /// a chunk with a specific alignment.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ContainsAlignmentsBitmap {
     bitmap: AlignmentSubBinsBitmapType,
 }
@@ -305,20 +302,20 @@ impl ContainsAlignmentsBitmap {
     /// Checks if the smallbin with the given index contains a chunk with an
     /// alignment greater than or equal to the given alignment.
     pub fn contains_aligment_greater_or_equal_to(&self, alignment: usize) -> bool {
-        self.bitmap as usize > (alignment >> MIN_ALIGNMENT_LOG2)
+        self.bitmap as usize >= (alignment >> MIN_ALIGNMENT_LOG2)
     }
 
     /// Marks the bitmap such that it indicates that a chunk with the given
     /// alignment index is present in the smallbin.
     pub fn set_contains_alignment(&mut self, alignment_index: usize) {
-        let alignment = SmallBins::alignment_of_alignment_index(alignment_index);
+        let alignment = 1 << alignment_index;
         self.bitmap |= alignment as AlignmentSubBinsBitmapType;
     }
 
     /// Marks the bitmap such that it indicates that a chunk with the given
     /// alignment index is not present in the smallbin.
     pub fn unset_contains_alignment(&mut self, alignment_index: usize) {
-        let alignment = SmallBins::alignment_of_alignment_index(alignment_index);
+        let alignment = 1 << alignment_index;
         self.bitmap &= !(alignment as AlignmentSubBinsBitmapType);
     }
 }

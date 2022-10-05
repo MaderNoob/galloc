@@ -167,15 +167,10 @@ fn alloc_aligned_end_padding() {
         MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
 
-    // the end padding chunk is the only free chunk so it points back to the
-    // allocator.
-    assert_eq!(
-        end_padding_chunk.fd,
-        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
-    );
-    assert_eq!(
-        end_padding_chunk.ptr_to_fd_of_bk,
-        (guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin()) as *mut _,
+    assert_only_1_free_chunk_in_bin(
+        &mut guard,
+        end_padding_chunk as *mut _ as usize,
+        end_padding_chunk.header.size(),
     );
 
     // make sure that the end padding size has written its postfix size
@@ -183,16 +178,6 @@ fn alloc_aligned_end_padding() {
         *end_padding_chunk.postfix_size(),
         MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
     );
-
-    // make sure that the allocator points to the end padding chunk.
-    assert_eq!(
-        guard.allocator.first_free_chunk_in_other_bin(),
-        Some(unsafe { NonNull::new_unchecked(end_padding_chunk as *mut _) })
-    );
-    assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
-        &mut end_padding_chunk.fd as *mut _
-    )
 }
 
 #[test]
@@ -228,8 +213,6 @@ fn alloc_unaligned_no_end_padding() {
     guard.init_with_alignment(MEM_SIZE, MEM_SIZE);
     let addr = guard.addr();
 
-    println!("addr: {:x}", addr);
-
     // choose an alignment that will cause the chunk to be unaligned.
     let alignment = MEM_SIZE >> 1;
 
@@ -264,18 +247,22 @@ fn alloc_unaligned_no_end_padding() {
     assert_eq!(start_padding_chunk.header.size(), start_padding_chunk_size);
 
     // make sure that the start padding chunk is the last chunk in the freelist,
-    // so it points back to the allocator.
-    assert_eq!(
-        start_padding_chunk.fd,
-        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
-    );
+    // and it's in a smallbin so its fd should be `None`.
+    assert_eq!(start_padding_chunk.fd, None);
 
-    // make sure that the start padding chunk is the first chunk in the freelist and
-    // points back to the allocator.
-    assert_eq!(
-        start_padding_chunk.ptr_to_fd_of_bk,
-        guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
-    );
+    // make sure the start padding chunk points back to the correct bin.
+
+    // we know its in a smallbin since its size is really small.
+    let smallbin_index = unsafe { SmallBins::smallbin_index(start_padding_chunk.size()).unwrap() };
+    let alignment_index = unsafe {
+        SmallBins::alignment_index_of_chunk_content_addr(start_padding_chunk.content_addr())
+    };
+
+    let ptr_to_fd_of_bin = &mut guard.allocator.smallbins.small_bins[smallbin_index]
+        .alignment_sub_bins[alignment_index]
+        .fd as *mut _;
+
+    assert_eq!(start_padding_chunk.ptr_to_fd_of_bk, ptr_to_fd_of_bin);
 
     // make sure that the allocated chunk is correct
     let allocated_chunk = unsafe {
@@ -294,16 +281,6 @@ fn alloc_unaligned_no_end_padding() {
 
     // check the size
     assert_eq!(allocated_chunk.0.size(), perfect_fit);
-
-    // make sure that the allocator's freelist points to the start padding chunk
-    assert_eq!(
-        guard.allocator.first_free_chunk_in_other_bin(),
-        Some(unsafe { NonNull::new_unchecked(addr as *mut _) })
-    );
-    assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
-        &mut start_padding_chunk.fd as *mut _
-    );
 }
 
 #[test]
@@ -334,69 +311,15 @@ fn alloc_unaligned_end_padding() {
     // make sure it points to where it should
     assert_eq!(allocated as usize, aligned_content_addr);
 
-    // make sure that the start padding chunk and the end padding chunk are correct
-    let start_padding_chunk = unsafe {
-        match Chunk::from_addr(addr) {
-            ChunkRef::Used(_) => panic!("start padding chunk is marked as used"),
-            ChunkRef::Free(free) => free,
-        }
-    };
-
-    let end_padding_chunk = unsafe {
-        match Chunk::from_addr(allocated as usize + size_with_large_enough_end_padding) {
-            ChunkRef::Used(_) => panic!("end padding chunk is marked as used"),
-            ChunkRef::Free(free) => free,
-        }
-    };
-
-    // the prev in use of the first chunk in the heap should be `true`.
-    assert_eq!(start_padding_chunk.header.prev_in_use(), true);
-
     // check the size of the start padding chunk
     let content_chunk_addr = aligned_content_addr - HEADER_SIZE;
     let start_padding_chunk_size = content_chunk_addr - addr - HEADER_SIZE;
-    assert_eq!(start_padding_chunk.header.size(), start_padding_chunk_size);
+    assert_only_1_free_chunk_in_bin(&mut guard, addr, start_padding_chunk_size);
 
-    // the start padding chunk should point to the end padding chunk.
-    assert_eq!(
-        start_padding_chunk.fd,
-        Some(unsafe { NonNull::new_unchecked(end_padding_chunk as *mut _) })
-    );
-
-    // make sure that the start padding chunk is the first chunk in the freelist and
-    // points back to the allocator.
-    assert_eq!(
-        start_padding_chunk.ptr_to_fd_of_bk,
-        guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
-    );
-
-    // the prev chunk is the allocated chunk, which is in use.
-    assert_eq!(end_padding_chunk.header.prev_in_use(), true);
-
-    // we left enough space for `MIN_FREE_CHUNK_SIZE`.
-    // subtracting `HEADER_SIZE` because `MIN_FREE_CHUNK_SIZE` includes the header.
-    assert_eq!(
-        end_padding_chunk.header.size(),
-        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
-    );
-
-    // the end padding chunk is the last free chunk so it points back to the
-    // allocator.
-    assert_eq!(
-        end_padding_chunk.fd,
-        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
-    );
-
-    // the bk of the end padding chunk is the start padding chunk.
-    assert_eq!(
-        end_padding_chunk.ptr_to_fd_of_bk,
-        (&mut start_padding_chunk.fd) as *mut _,
-    );
-
-    // make sure that the end padding size has written its postfix size
-    assert_eq!(
-        *end_padding_chunk.postfix_size(),
-        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
+    assert_only_1_free_chunk_in_bin(
+        &mut guard,
+        allocated as usize + size_with_large_enough_end_padding,
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE,
     );
 
     // make sure that the allocated chunk is correct
@@ -416,15 +339,4 @@ fn alloc_unaligned_end_padding() {
 
     // check the size
     assert_eq!(allocated_chunk.0.size(), size_with_large_enough_end_padding);
-
-    // make sure that the allocator's freelist points to the start padding chunk
-    assert_eq!(
-        guard.allocator.first_free_chunk_in_other_bin(),
-        Some(unsafe { NonNull::new_unchecked(addr as *mut _) })
-    );
-
-    assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
-        &mut end_padding_chunk.fd as *mut _
-    );
 }

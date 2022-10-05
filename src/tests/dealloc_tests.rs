@@ -19,7 +19,7 @@ fn dealloc_prev_used_next_used() {
     };
     unsafe { guard.allocator.dealloc(allocated) };
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn dealloc_prev_used_next_free() {
         guard.allocator.dealloc(allocated);
     }
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }
 
 #[test]
@@ -79,14 +79,20 @@ fn dealloc_prev_free_next_used() {
         guard.allocator.dealloc(allocated1);
     }
 
-    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
+    assert_only_1_free_chunk_which_is_at_heap_start(
+        &mut guard,
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
+    );
 
     unsafe {
         guard.allocator.dealloc(allocated2);
     }
 
     // treat it as if the 2 first chunks are now the entire heap
-    assert_only_1_free_chunk(&mut guard, 2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
+    assert_only_1_free_chunk_which_is_at_heap_start(
+        &mut guard,
+        2 * MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
+    );
 
     // make sure the prev in use and size of the third chunk is correct
     let third_chunk_addr = (allocated3 as usize) - HEADER_SIZE;
@@ -95,7 +101,7 @@ fn dealloc_prev_free_next_used() {
             ChunkRef::Used(used) => used,
             ChunkRef::Free(_) => {
                 panic!("the third chunk is marked free even though it wasn't deallocated")
-            },
+            }
         }
     };
 
@@ -110,7 +116,7 @@ fn dealloc_prev_free_next_used() {
         guard.allocator.dealloc(allocated3);
     }
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }
 
 #[test]
@@ -144,97 +150,20 @@ fn dealloc_prev_free_next_free() {
         guard.allocator.dealloc(allocated1);
     }
 
-    assert_only_1_free_chunk(&mut guard, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER);
+    assert_only_1_free_chunk_which_is_at_heap_start(
+        &mut guard,
+        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
+    );
 
     unsafe {
         guard.allocator.dealloc(allocated3);
     }
 
-    let first_chunk = unsafe {
-        match Chunk::from_addr(allocated1 as usize - HEADER_SIZE) {
-            ChunkRef::Used(_) => panic!("freed chunk is marked as used"),
-            ChunkRef::Free(free) => free,
-        }
-    };
-
-    // make sure that the third chunk is correct
-    let third_chunk_addr = (allocated3 as usize) - HEADER_SIZE;
-    let third_chunk = unsafe {
-        match Chunk::from_addr(third_chunk_addr) {
-            ChunkRef::Used(_) => panic!("freed chunk is marked as used"),
-            ChunkRef::Free(free) => free,
-        }
-    };
-
-    // the first chunk's prev in use flag must be `true`.
-    assert_eq!(first_chunk.header.prev_in_use(), true);
-
-    assert_eq!(
-        first_chunk.size(),
-        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
-    );
-
-    // the first chunk is last in the linked list so it points back to the
-    // allocator, and before it comes the third.
-    assert_eq!(
-        first_chunk.fd,
-        Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() })
-    );
-    assert_eq!(first_chunk.ptr_to_fd_of_bk, (&mut third_chunk.fd) as *mut _,);
-
-    // the third chunk's prev in use flag should be true because we haven't
-    // deallocated the second chunk.
-    assert_eq!(third_chunk.header.prev_in_use(), true);
-
-    assert_eq!(third_chunk.size(), third_chunk_size);
-
-    // the third chunk is the first in the freelist
-    assert_eq!(
-        third_chunk.fd,
-        Some(unsafe { NonNull::new_unchecked(first_chunk as *mut _) })
-    );
-    assert_eq!(
-        third_chunk.ptr_to_fd_of_bk,
-        guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
-    );
-
-    // make sure the allocator points to the first chunk in the linked list which
-    // is the third chunk.
-    assert_eq!(
-        guard.allocator.first_free_chunk_in_other_bin(),
-        Some(unsafe { NonNull::new_unchecked(third_chunk as *mut _) })
-    );
-    assert_eq!(
-        guard.allocator.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
-        &mut first_chunk.fd as *mut _
-    );
-
-    // make sure the prev in use of the second chunk is correct
-    let second_chunk_addr = (allocated2 as usize) - HEADER_SIZE;
-    let second_chunk = unsafe {
-        match Chunk::from_addr(second_chunk_addr) {
-            ChunkRef::Used(used) => used,
-            ChunkRef::Free(_) => {
-                panic!("the second chunk is marked free even though it wasn't deallocated")
-            },
-        }
-    };
-
-    assert_eq!(
-        second_chunk.prev_size_if_free(),
-        Some(MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE)
-    );
-
-    assert_eq!(
-        second_chunk.0.size(),
-        MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE
-    );
-
     unsafe {
         guard.allocator.dealloc(allocated2);
     }
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }
 
 #[test]
@@ -268,7 +197,7 @@ fn dealloc_lots_of_allocations() {
         }
     }
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }
 
 #[test]
@@ -306,5 +235,5 @@ fn dealloc_lots_of_allocations_dealloc_in_random_order() {
         }
     }
 
-    assert_only_1_free_chunk(&mut guard, MEM_SIZE);
+    assert_only_1_free_chunk_which_is_at_heap_start(&mut guard, MEM_SIZE);
 }

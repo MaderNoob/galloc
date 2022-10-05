@@ -319,19 +319,9 @@ impl FreeChunk {
         self.fd
     }
 
-    /// Returns a mutable reference the fd pointer of this chunk.
-    pub fn fd_ref_mut(&mut self) -> &mut Option<FreeChunkPtr> {
-        &mut self.fd
-    }
-
     /// Returns a mutable reference to the fd chunk.
     pub fn fd_chunk_ref(&mut self) -> Option<FreeChunkRef> {
         Some(unsafe { self.fd?.as_mut() })
-    }
-
-    /// Returns a pointer to the fd of this chunk's bk chunk.
-    pub fn ptr_to_fd_of_bk(&mut self) -> *mut Option<FreeChunkPtr> {
-        self.ptr_to_fd_of_bk
     }
 
     /// Returns a mutable reference to this chunk's postfix size.
@@ -343,11 +333,6 @@ impl FreeChunk {
     /// Sets the size of this free chunk, updates the postfix size, and updates
     /// the bin that this chunk is in, if needed.
     pub fn set_size_and_update_bin(&mut self, new_size: usize, allocator: &mut Allocator) {
-        println!(
-            "size size and update bin. old size: {}, new size: {}",
-            self.size(),
-            new_size
-        );
         // we are about to change the size of the chunk, so it might have to change
         // bins.
         //
@@ -360,7 +345,6 @@ impl FreeChunk {
         if unsafe {
             SmallBins::is_smallbin_size(self.size()) || SmallBins::is_smallbin_size(new_size)
         } {
-            println!("change bins");
             // if this chunk was in a smallbin and its size was changed, move it to another
             // bin. get fd and bk for the new size of the chunk
             let (fd, bk) = unsafe {
@@ -369,7 +353,6 @@ impl FreeChunk {
                     SmallBins::alignment_index_of_chunk_content_addr(self.content_addr()),
                 )
             };
-            println!("get fd and bk, fd: {:?}, bk: {:?}", fd, bk);
             // SAFETY: right after re-linking we update the size.
             unsafe { self.relink(&mut allocator.smallbins, fd, bk) };
         }
@@ -572,8 +555,8 @@ impl FreeChunk {
         if was_last_chunk {
             // SAFETY: the given size is the size of an actual chunk, which must have
             // already been prepared.
-            if let Some(smallbin_index) = unsafe { SmallBins::smallbin_index(self.size()) } {
-                let alignment_index = unsafe {
+            if let Some(smallbin_index) = SmallBins::smallbin_index(self.size()) {
+                let alignment_index = {
                     // SAFETY: the provided content address is the content address of an actual
                     // chunk, so it must be aligned.
                     SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
@@ -676,6 +659,7 @@ pub enum ChunkRef {
 ///
 /// This is used for bins which require a circular doubly linked list.
 #[repr(C)]
+#[derive(Debug)]
 pub struct FakeFreeChunk {
     pub(crate) fd: Option<FreeChunkPtr>,
     pub(crate) ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
@@ -691,10 +675,6 @@ impl FakeFreeChunk {
     pub unsafe fn free_chunk_ptr(&self) -> FreeChunkPtr {
         const OFFSET_OF_FD_IN_FREE_CHUNK: usize = USIZE_SIZE;
 
-        unsafe {
-            NonNull::new_unchecked(
-                (self as *const _ as usize - OFFSET_OF_FD_IN_FREE_CHUNK) as *mut _,
-            )
-        }
+        NonNull::new_unchecked((self as *const _ as usize - OFFSET_OF_FD_IN_FREE_CHUNK) as *mut _)
     }
 }
