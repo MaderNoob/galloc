@@ -1,5 +1,3 @@
-#![no_std]
-
 #[cfg(test)]
 #[macro_use]
 extern crate std;
@@ -102,11 +100,16 @@ impl Allocator {
         // create a free chunk for the entire heap.
         // no need to update the next chunk because there is no next chunk, this chunk
         // covers the entire heap.
+        let chunk_size = aligned_size - HEADER_SIZE;
+        let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+            chunk_size,
+            SmallBins::alignment_index_of_chunk_content_addr(aligned_heap_start_addr + HEADER_SIZE),
+        );
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             aligned_heap_start_addr,
-            aligned_size - HEADER_SIZE,
-            Some(self.fake_chunk_of_other_bin_ptr()),
-            self.ptr_to_fd_of_fake_chunk_of_other_bin(),
+            chunk_size,
+            fd,
+            bk,
         );
 
         // update the heap end address.
@@ -155,7 +158,6 @@ impl Allocator {
     /// # Safety
     ///
     ///  - `chunk_size` must be the size of an actual chunk.
-    ///  - `chunk_content_binary_alignment` must be a power of 2.
     unsafe fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
         &mut self,
         chunk_size: usize,
@@ -399,23 +401,27 @@ impl Allocator {
                 // which is made up of its header, and its content.
                 chunk.set_size(chunk.0.size() + HEADER_SIZE + next_chunk_free.size());
 
+                // unlink the next free chunk, because we include its memory region in `chunk`.
+                next_chunk_free.unlink(&mut self.smallbins);
+
                 // mark the chunk as free.
-                //
-                // this will also unlink the next chunk and replace it with this deallocated
-                // chunk, in the linked list of free chunks.
-                let _ = chunk.mark_as_free_without_updating_next_chunk(
-                    next_chunk_free.fd,
-                    next_chunk_free.ptr_to_fd_of_bk,
+                let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                    chunk.0.size(),
+                    SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
+                let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
             },
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
-                // chunk. in other words, make it large enough so that it
-                // includes the entire current chunk,
+                // chunk. in other words, make it large enough so that it includes the entire
+                // current chunk.
                 //
-                // which means that it should include itself, the current chunk's header, and
+                // the resized prev chunk should include itself, the current chunk's header, and
                 // the current chunk's content.
-                prev_chunk_free.set_size(prev_chunk_free.size() + HEADER_SIZE + chunk.0.size());
+                prev_chunk_free.set_size_and_update_bin(
+                    prev_chunk_free.size() + HEADER_SIZE + chunk.0.size(),
+                    self,
+                );
 
                 // we must also update the prev in use bit of the next chunk, if any, because
                 // its prev is now free.
@@ -432,7 +438,7 @@ impl Allocator {
 
                 // SAFETY: this is safe because this chunk will now be incorporated in the prev
                 // chunk, so no memory is lost.
-                next_chunk_free.unlink();
+                next_chunk_free.unlink(&mut self.smallbins);
 
                 // the prev chunk will now include the following:
                 // - itself
@@ -440,12 +446,13 @@ impl Allocator {
                 // - the current chunk's content
                 // - the next chunk's header
                 // - the next chunk's content
-                prev_chunk_free.set_size(
+                prev_chunk_free.set_size_and_update_bin(
                     prev_chunk_free.size()
                         + HEADER_SIZE
                         + chunk.0.size()
                         + HEADER_SIZE
                         + next_chunk_free.size(),
+                    self,
                 );
             },
         }
@@ -508,7 +515,8 @@ impl Allocator {
             self.try_grow_in_place(chunk, new_size)
         } else {
             // the user requested to shrink his allocation, shrink in place.
-            self.try_shrink_in_place(chunk, new_size)
+            self.shrink_in_place(chunk, new_size);
+            true
         }
     }
 
@@ -522,7 +530,7 @@ impl Allocator {
     ///
     /// `new_size` must be greater than the chunk's size, and must have been
     /// prepared.
-    unsafe fn try_grow_in_place(&self, chunk: UsedChunkRef, new_size: usize) -> bool {
+    unsafe fn try_grow_in_place(&mut self, chunk: UsedChunkRef, new_size: usize) -> bool {
         // to grow this chunk we need its next chunk to be free, make sure that the next
         // chunk is free.
         let next_chunk_free = match chunk.next_chunk_if_free(self.heap_end_addr) {
@@ -557,8 +565,8 @@ impl Allocator {
         let space_left_at_end_of_next_free_chunk = next_chunk_end_addr - new_end_addr;
         if space_left_at_end_of_next_free_chunk > MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
             // the space left at the end of the next free chunk is enough to
-            // store a free chunk, so we must create a new free chunk for it
-            // while unlinking `next_chunk_free`, and then we can resize `chunk`
+            // store a free chunk, so we must move the next free chunk forward to the new
+            // end address and resize it accordingly, and then we can resize `chunk`
             // to include the space between it and the new free chunk.
             //
             // also note that there is no need to update the prev in use of the
@@ -566,16 +574,10 @@ impl Allocator {
             // free chunk that we're creating, and its prev in use bit is
             // already set to false.
 
-            // create a new free chunk where the resized chunk ends, for the
-            // space left there, no need to update the next chunk as explained above.
-            //
-            // this will also unlink `next_chunk_free` and put itself in place of it in the
-            // freelist.
-            let _ = FreeChunk::create_new_without_updating_next_chunk(
+            next_chunk_free.move_and_resize_chunk_without_updating_next_chunk(
                 new_end_addr,
                 space_left_at_end_of_next_free_chunk - HEADER_SIZE,
-                next_chunk_free.fd,
-                next_chunk_free.ptr_to_fd_of_bk,
+                self,
             );
 
             // resize `chunk` to the desired size. this will make `chunk` include all the
@@ -602,7 +604,9 @@ impl Allocator {
                 // its prev is now `chunk`, which is used.
                 Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_of_next_chunk_addr, true);
             }
-            next_chunk_free.unlink();
+
+            next_chunk_free.unlink(&mut self.smallbins);
+
             // make sure that it includes all of the next chunk
             chunk.set_size(next_chunk_end_addr - chunk.content_addr());
 
@@ -611,40 +615,33 @@ impl Allocator {
         }
     }
 
-    /// Tries to grow the given chunk in place, to the given new size. Please
-    /// note that this means that the alignment of the content of this chunk
-    /// will stay exactly the same.
-    ///
-    /// Returns whether or not the operation was successful.
+    /// Shrinks the given chunk in place, to the given new size. Please note
+    /// that this means that the alignment of the content of this chunk will
+    /// stay exactly the same.
     ///
     /// # Safety
     ///
     /// `new_size` must be lower than the chunk's size, and must have been
     /// prepared.
-    unsafe fn try_shrink_in_place(&mut self, chunk: UsedChunkRef, new_size: usize) -> bool {
+    unsafe fn shrink_in_place(&mut self, chunk: UsedChunkRef, new_size: usize) {
         // calculate the new end addresss of the chunk.
         let new_end_addr = chunk.content_addr() + new_size;
 
         match chunk.next_chunk_if_free(self.heap_end_addr) {
             Some(next_chunk_free) => {
-                // if the next chunk is free, we can just move it back and shrink `chunk`.
-                // no need to update the next chunk, because it already knows that its prev
-                // chunk is free.
-                let _ = FreeChunk::create_new_without_updating_next_chunk(
+                // we can just move the next chunk backwards to include the extra space that's
+                // left due to shrinking in place.
+                next_chunk_free.move_and_resize_chunk_without_updating_next_chunk(
                     new_end_addr,
                     // the size is calculated by subtracting the new start address of the free
                     // chunk from its current end address, and subtracting the header size because
                     // we only want the size of the content, excluding the header.
                     next_chunk_free.end_addr() - new_end_addr - HEADER_SIZE,
-                    next_chunk_free.fd,
-                    next_chunk_free.ptr_to_fd_of_bk,
+                    self,
                 );
 
                 // resize `chunk` to the desired size.
                 chunk.set_size(new_size);
-
-                // we have successfully shrinked the chunk in place.
-                true
             },
             None => {
                 // calculate how much space we have left at the end of this chunk after
@@ -687,14 +684,13 @@ impl Allocator {
 
                     // resize `chunk` to the desired size.
                     chunk.set_size(new_size);
-
-                    true
                 } else {
-                    // if we don't have enough space to create a free chunk there, just leave it
-                    // there. this prioritizes runtime efficiency over memory
-                    // efficiency, because it prevents copying the entire memory, but it wastes a
-                    // little bit of memory (up to 32 bytes).
-                    true
+                    // if we don't have enough space to create a free chunk
+                    // there, just leave it there. this
+                    // prioritizes runtime efficiency over memory
+                    // efficiency, because it prevents copying the entire
+                    // memory, but it wastes a little bit of
+                    // memory (up to 32 bytes).
                 }
             },
         }
@@ -760,7 +756,7 @@ impl Allocator {
         // shrink the current chunk to leave some space for the new aligned allocated
         // chunk.
         let cur_chunk_new_size = aligned_start_addr - cur_chunk.content_addr();
-        cur_chunk.set_size(cur_chunk_new_size);
+        cur_chunk.set_size_and_update_bin(cur_chunk_new_size, self);
 
         self.alloc_unaligned_after_splitting_start_padding(
             layout_size,

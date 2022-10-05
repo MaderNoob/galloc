@@ -228,6 +228,8 @@ fn alloc_unaligned_no_end_padding() {
     guard.init_with_alignment(MEM_SIZE, MEM_SIZE);
     let addr = guard.addr();
 
+    println!("addr: {:x}", addr);
+
     // choose an alignment that will cause the chunk to be unaligned.
     let alignment = MEM_SIZE >> 1;
 

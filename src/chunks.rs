@@ -1,6 +1,8 @@
 use core::ptr::NonNull;
 
-use crate::{bins::SmallBins, divisible_by_4_usize::DivisbleBy4Usize, HEADER_SIZE, USIZE_SIZE};
+use crate::{
+    bins::SmallBins, divisible_by_4_usize::DivisbleBy4Usize, Allocator, HEADER_SIZE, USIZE_SIZE,
+};
 
 /// A chunk in the heap.
 #[repr(transparent)]
@@ -338,8 +340,39 @@ impl FreeChunk {
         unsafe { &mut *postfix_size_ptr }
     }
 
-    /// Sets the size of this free chunk and updates the postfix size.
-    pub fn set_size(&mut self, new_size: usize) {
+    /// Sets the size of this free chunk, updates the postfix size, and updates
+    /// the bin that this chunk is in, if needed.
+    pub fn set_size_and_update_bin(&mut self, new_size: usize, allocator: &mut Allocator) {
+        println!(
+            "size size and update bin. old size: {}, new size: {}",
+            self.size(),
+            new_size
+        );
+        // we are about to change the size of the chunk, so it might have to change
+        // bins.
+        //
+        // we only need to change bins if we were already in a small bin, or if the new
+        // size requires us to be in a smallbin, because otherwise we are just moving
+        // from other bin to other bin.
+        //
+        // SAFETY: we provide a size of an actual chunk, thus it must have already been
+        // prepared.
+        if unsafe {
+            SmallBins::is_smallbin_size(self.size()) || SmallBins::is_smallbin_size(new_size)
+        } {
+            println!("change bins");
+            // if this chunk was in a smallbin and its size was changed, move it to another
+            // bin. get fd and bk for the new size of the chunk
+            let (fd, bk) = unsafe {
+                allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                    new_size,
+                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr()),
+                )
+            };
+            println!("get fd and bk, fd: {:?}, bk: {:?}", fd, bk);
+            // SAFETY: right after re-linking we update the size.
+            unsafe { self.relink(&mut allocator.smallbins, fd, bk) };
+        }
         self.header.set_size(new_size);
         *self.postfix_size() = new_size;
     }
@@ -395,39 +428,11 @@ impl FreeChunk {
         heap_end_addr: usize,
         smallbins: &mut SmallBins,
     ) -> UsedChunkRef {
-        // remember if this chunk was the last chunk in the freelist.
-        //
-        // this can save us the part where we update the smallbin, because if we know
-        // that this chunk wasn't last, then there's no way that unlinking it emptied
-        // the sub-bin.
-        let was_last_chunk = self.fd.is_none();
-
         // this is safe because we then unlink it.
         let _ = unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) };
 
         // this is safe because the chunk will now be used.
-        unsafe { self.unlink() };
-
-        // update the smallbins in case unlinking this chunk just emptied the sub-bin
-        // that it was in.
-        //
-        // if this chunk wasn't last, there's no way that unlinking it could have
-        // emptied the sub-bin.
-        if was_last_chunk {
-            // SAFETY: the given size is the size of an actual chunk, which must have
-            // already been prepared.
-            if let Some(smallbin_index) = unsafe { SmallBins::smallbin_index(self.size()) } {
-                let alignment_index = unsafe {
-                    // SAFETY: the provided content address is the content address of an actual
-                    // chunk, so it must be aligned.
-                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
-                };
-                smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
-                    smallbin_index,
-                    alignment_index,
-                );
-            }
-        }
+        unsafe { self.unlink(smallbins) };
 
         unsafe { core::mem::transmute(self) }
     }
@@ -517,11 +522,30 @@ impl FreeChunk {
 
     /// Unlinks this chunk from the linked list of free chunks.
     ///
+    /// If unlinking this chunk emptied the alignment sub-bin that this chunk
+    /// was in, updates the contains alignments bitmap of the smallbin to
+    /// indicate that.
+    ///
     /// # Safety
     ///
-    /// You must make sure to make use of this chunk and keep track of it, do
-    /// not lose the memory.
+    /// You must make sure that the size of this chunk is unaltered before
+    /// unlinking, because this function uses the chunk's size to find the
+    /// smallbin that it's in.
+    ///
+    /// You must make sure to make use of this chunk
+    /// and keep track of it, do not lose the memory.
     pub unsafe fn unlink(&mut self, smallbins: &mut SmallBins) {
+        // remember if this chunk was the last chunk in the freelist.
+        //
+        // this can save us the part where we update the smallbin, because if we know
+        // that this chunk wasn't last, then there's no way that unlinking it emptied
+        // the sub-bin.
+        //
+        // this also makes sure that we don't do any redundant work in case this chunk
+        // was in the other bin, since in the other bin the `fd` is never `None`,
+        // because it's circular.
+        let was_last_chunk = self.fd.is_none();
+
         // unlink this chunk from the linked list of free chunks, to do that we
         // need to change the state:
         // ```
@@ -538,6 +562,105 @@ impl FreeChunk {
         // make fd point back to bk
         if let Some(fd) = self.fd_chunk_ref() {
             fd.ptr_to_fd_of_bk = self.ptr_to_fd_of_bk;
+        }
+
+        // update the smallbins in case unlinking this chunk just emptied the sub-bin
+        // that it was in.
+        //
+        // if this chunk wasn't last, there's no way that unlinking it could have
+        // emptied the sub-bin.
+        if was_last_chunk {
+            // SAFETY: the given size is the size of an actual chunk, which must have
+            // already been prepared.
+            if let Some(smallbin_index) = unsafe { SmallBins::smallbin_index(self.size()) } {
+                let alignment_index = unsafe {
+                    // SAFETY: the provided content address is the content address of an actual
+                    // chunk, so it must be aligned.
+                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
+                };
+                smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
+                    smallbin_index,
+                    alignment_index,
+                );
+            }
+        }
+    }
+
+    /// Unlinks this chunk from the linked list of free chunks, and re-links it
+    /// to another linked list according to the given fd and bk pointers.
+    ///
+    /// If re-linking this chunk emptied the alignment sub-bin that this chunk
+    /// was in, updates the contains alignments bitmap of the smallbin to
+    /// indicate that.
+    ///
+    /// # Safety
+    ///
+    /// You must update this chunk's size to fit the new bin that it's now in,
+    /// right after calling this function, but not before it, because then
+    /// unlink would use a wrong size.
+    pub unsafe fn relink(
+        &mut self,
+        smallbins: &mut SmallBins,
+        fd: Option<FreeChunkPtr>,
+        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
+    ) {
+        self.unlink(smallbins);
+
+        // make this chunk point to the given fd and bk.
+        self.fd = fd;
+        self.ptr_to_fd_of_bk = ptr_to_fd_of_bk;
+
+        // make `fd` point back to this chunk
+        if let Some(mut fd) = fd {
+            let fd_ref = fd.as_mut();
+            fd_ref.ptr_to_fd_of_bk = &mut self.fd;
+        }
+
+        // make `bk` point to this chunk
+        *ptr_to_fd_of_bk = Some(FreeChunkPtr::new_unchecked(self.addr() as *mut _));
+    }
+
+    /// Moves this chunk to the given address, and resizes it to the given size.
+    ///
+    /// This function updates the bins and the linked lists, but doesn't update
+    /// the next chunk after moving to the new location.
+    ///
+    /// # Safety
+    ///
+    /// You must make sure that the next chunk after moving this chunk to its
+    /// new location knows that its prev chunk is now free.
+    pub unsafe fn move_and_resize_chunk_without_updating_next_chunk(
+        &mut self,
+        new_addr: usize,
+        new_size: usize,
+        allocator: &mut Allocator,
+    ) -> FreeChunkRef {
+        // if the chunk was already in a smallbin, or will now move to a smaillbin, it
+        // means we need to change bins. Otherwise it was in the other bin and stays
+        // there, so we don't need to change bins.
+        if SmallBins::is_smallbin_size(self.size()) || SmallBins::is_smallbin_size(new_size) {
+            // we need to change bins.
+
+            // unlink the current chunk
+            self.unlink(&mut allocator.smallbins);
+
+            // create a new free chunk at the new location and insert it into the correct
+            // bin.
+            let (fd, bk) = allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+                new_size,
+                SmallBins::alignment_index_of_chunk_content_addr(new_addr + HEADER_SIZE),
+            );
+            FreeChunk::create_new_without_updating_next_chunk(new_addr, new_size, fd, bk)
+        } else {
+            // no need to change bins.
+            //
+            // create a new chunk and replace `self` in the freelist with that new chunk.
+            FreeChunk::create_new_without_updating_next_chunk(
+                new_addr,
+                new_size,
+                self.fd,
+                self.ptr_to_fd_of_bk,
+            )
         }
     }
 }

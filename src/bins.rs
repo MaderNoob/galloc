@@ -207,10 +207,9 @@ impl SmallBins {
         // now present in the smallbin.
         let smallbin = &mut self.small_bins[smallbin_index];
 
-        let alignment = Self::alignment_of_alignment_index(alignment_index);
         smallbin
             .contains_alignments_bitmap
-            .set_contains_alignment(alignment);
+            .set_contains_alignment(alignment_index);
 
         let mut alignment_sub_bin = smallbin.alignment_sub_bins[alignment_index];
 
@@ -228,10 +227,9 @@ impl SmallBins {
 
         // if the sub-bin is now empty, update the bitmap
         if smallbin.alignment_sub_bins[alignment_index].fd.is_none() {
-            let alignment = Self::alignment_of_alignment_index(alignment_index);
             smallbin
                 .contains_alignments_bitmap
-                .set_contains_alignment(alignment)
+                .unset_contains_alignment(alignment_index)
         }
     }
 }
@@ -311,8 +309,16 @@ impl ContainsAlignmentsBitmap {
     }
 
     /// Marks the bitmap such that it indicates that a chunk with the given
-    /// alignment is present in the smallbin.
-    pub fn set_contains_alignment(&mut self, alignment: usize) {
+    /// alignment index is present in the smallbin.
+    pub fn set_contains_alignment(&mut self, alignment_index: usize) {
+        let alignment = SmallBins::alignment_of_alignment_index(alignment_index);
         self.bitmap |= alignment as AlignmentSubBinsBitmapType;
+    }
+
+    /// Marks the bitmap such that it indicates that a chunk with the given
+    /// alignment index is not present in the smallbin.
+    pub fn unset_contains_alignment(&mut self, alignment_index: usize) {
+        let alignment = SmallBins::alignment_of_alignment_index(alignment_index);
+        self.bitmap &= !(alignment as AlignmentSubBinsBitmapType);
     }
 }
