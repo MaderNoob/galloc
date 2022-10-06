@@ -34,14 +34,9 @@ pub const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize =
     core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
 pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 
-// `CHUNK_SIZE_ALIGNMENT` is guaranteed to be larger than 4, because
-// `MIN_ALIGNMENT` is at least 8, so storing the size as a `DivisibleBy4Usize`
-// is safe.
-const CHUNK_SIZE_ALIGNMENT: usize = MIN_ALIGNMENT;
-
-// `CHUNK_SIZE_ALIGNMENT` must be larger than 4, so that storing the size as a
+// `MIN_ALIGNMENT` must be larger than 4, so that storing the size as a
 // `DivisibleBy4Usize` is safe.
-const_assert!(CHUNK_SIZE_ALIGNMENT >= 4);
+const_assert!(MIN_ALIGNMENT >= 4);
 
 /// A linked list memory allocator.
 #[derive(Debug)]
@@ -158,7 +153,7 @@ impl Allocator {
         unsafe {
             align_up(
                 core::cmp::max(size, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE),
-                CHUNK_SIZE_ALIGNMENT,
+                MIN_ALIGNMENT,
             )
         }
     }
@@ -216,7 +211,7 @@ impl Allocator {
                         self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
-            }
+            },
             // if the other bin is empty, put this chunk as the first chunk in the bin.
             None => (
                 // SAFETY: the fake chunk will be used as the fd of some other chunk, but chunks
@@ -364,8 +359,8 @@ impl Allocator {
         None
     }
 
-    /// Tries to allocate a chunk from the aligned sub-optimal chunks for the given
-    /// allocation requirements.
+    /// Tries to allocate a chunk from the aligned sub-optimal chunks for the
+    /// given allocation requirements.
     ///
     /// This strategy should be called after trying the other bin.
     ///
@@ -392,10 +387,11 @@ impl Allocator {
         Some(self.alloc_aligned(layout_size, allocated_chunk.as_mut()))
     }
 
-    /// Tries to allocate a chunk from the unaligned sub-optimal chunks for the given
-    /// allocation requirements.
+    /// Tries to allocate a chunk from the unaligned sub-optimal chunks for the
+    /// given allocation requirements.
     ///
-    /// This strategy should be called after trying the aligned suboptimal chunks.
+    /// This strategy should be called after trying the aligned suboptimal
+    /// chunks.
     ///
     /// # Safety
     ///
@@ -447,7 +443,7 @@ impl Allocator {
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
-            }
+            },
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -468,7 +464,7 @@ impl Allocator {
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
-            }
+            },
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it includes the entire
@@ -486,7 +482,7 @@ impl Allocator {
                 if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            }
+            },
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -512,7 +508,7 @@ impl Allocator {
                         + next_chunk_free.size(),
                     self,
                 );
-            }
+            },
         }
     }
 
@@ -597,7 +593,7 @@ impl Allocator {
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            }
+            },
         };
 
         // calculate the new end addresss of the chunk.
@@ -700,7 +696,7 @@ impl Allocator {
 
                 // resize `chunk` to the desired size.
                 chunk.set_size(new_size);
-            }
+            },
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -748,7 +744,7 @@ impl Allocator {
                     // memory, but it wastes a little bit of
                     // memory (up to 32 bytes).
                 }
-            }
+            },
         }
     }
 
@@ -1019,8 +1015,8 @@ impl Allocator {
 
         // unlink the current chunk and mark it as used.
         //
-        // SAFETY: the next chunk is the end padding chunk, and was just created as a free
-        // chunk, and when creating a free chunk its prev in use bit is
+        // SAFETY: the next chunk is the end padding chunk, and was just created as a
+        // free chunk, and when creating a free chunk its prev in use bit is
         // automatically set to true, so no need to update it.
         //
         // also please note that if we tried to update the next chunk here it would
@@ -1146,9 +1142,10 @@ unsafe impl core::alloc::Allocator for SpinLockedAllocator {
             let new_ptr = self.allocate(new_layout)?;
 
             // SAFETY: because `new_layout.size()` must be lower than or equal to
-            // `old_layout.size()`, both the old and new memory allocation are valid for reads and
-            // writes for `new_layout.size()` bytes. Also, because the old allocation wasn't yet
-            // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+            // `old_layout.size()`, both the old and new memory allocation are valid for
+            // reads and writes for `new_layout.size()` bytes. Also, because the
+            // old allocation wasn't yet deallocated, it cannot overlap
+            // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
             // safe. The safety contract for `dealloc` must be upheld by the caller.
 
             core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
@@ -1175,10 +1172,11 @@ unsafe impl core::alloc::Allocator for SpinLockedAllocator {
         let new_ptr = self.allocate(new_layout)?;
 
         // SAFETY: because `new_layout.size()` must be greater than or equal to
-        // `old_layout.size()`, both the old and new memory allocation are valid for reads and
-        // writes for `old_layout.size()` bytes. Also, because the old allocation wasn't yet
-        // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
-        // safe. The safety contract for `dealloc` must be upheld by the caller.
+        // `old_layout.size()`, both the old and new memory allocation are valid for
+        // reads and writes for `old_layout.size()` bytes. Also, because the old
+        // allocation wasn't yet deallocated, it cannot overlap `new_ptr`. Thus,
+        // the call to `copy_nonoverlapping` is safe. The safety contract for
+        // `dealloc` must be upheld by the caller.
 
         core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
         self.deallocate(ptr, old_layout);

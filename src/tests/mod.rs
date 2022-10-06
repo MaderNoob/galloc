@@ -28,7 +28,7 @@ fn random_alloc_dealloc_realloc() {
                 let max_chunk_size = size_left - HEADER_SIZE;
                 let min_chunk_size = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
                 let unaligned_size = rng.gen_range(min_chunk_size..=max_chunk_size);
-                let aligned_size = unsafe { align_up(unaligned_size, CHUNK_SIZE_ALIGNMENT) };
+                let aligned_size = unsafe { align_up(unaligned_size, MIN_ALIGNMENT) };
                 aligned_size
             }
 
@@ -100,7 +100,8 @@ fn random_alloc_dealloc_realloc() {
     }
 }
 
-/// Asserts that there is only 1 free chunk in the bin of the chunk at the given addr.
+/// Asserts that there is only 1 free chunk in the bin of the chunk at the given
+/// addr.
 fn assert_only_1_free_chunk_in_bin(guard: &mut AllocatorInitGuard, addr: usize, size: usize) {
     let free_chunk = unsafe {
         match Chunk::from_addr(addr) {
@@ -148,7 +149,8 @@ fn assert_only_1_free_chunk_which_is_at_heap_start(
     assert_only_1_free_chunk_in_bin(guard, guard.addr(), mem_size - HEADER_SIZE)
 }
 
-/// Returns the expected fd and bk for a chunk with the given size and content address, assuming that it's the only free chunk in its bin.
+/// Returns the expected fd and bk for a chunk with the given size and content
+/// address, assuming that it's the only free chunk in its bin.
 fn get_expected_fd_and_bk_for_chunk_with_size(
     size: usize,
     content_addr: usize,
@@ -161,14 +163,14 @@ fn get_expected_fd_and_bk_for_chunk_with_size(
             let sub_bin = &mut guard.allocator.smallbins.small_bins[smallbin_index]
                 .alignment_sub_bins[alignment_index];
             (None, &mut sub_bin.fd as *mut _)
-        }
+        },
         None => {
             // the chunk is in the other bin
             (
                 Some(unsafe { guard.allocator.fake_chunk_of_other_bin_ptr() }),
                 guard.allocator.ptr_to_fd_of_fake_chunk_of_other_bin(),
             )
-        }
+        },
     }
 }
 
