@@ -160,7 +160,12 @@ impl SmallBins {
     ///
     ///  - The size and alignment must be prepared.
     ///  - The size must be the size of a smallbin.
-    pub fn suboptimal_chunks<'a>(&'a self, size: usize) -> impl Iterator<Item = FreeChunkPtr> + 'a {
+    pub fn aligned_suboptimal_chunks<'a>(
+        &'a self,
+        size: usize,
+        alignment: usize,
+        alignment_index: usize,
+    ) -> impl Iterator<Item = FreeChunkPtr> + 'a {
         let perfect_size_fit_smallbin_index = (size - SMALLEST_SMALLBIN_SIZE) / MIN_ALIGNMENT;
 
         // if we failed to allocate from the other bin, we should try to allocate from
@@ -178,7 +183,47 @@ impl SmallBins {
         // in is smaller than the optimal size + `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`.
         self.small_bins[perfect_size_fit_smallbin_index + 1..SMALLBINS_AMOUNT]
             .iter()
-            .map(move |small_bin| small_bin.alignment_sub_bins.iter())
+            .filter(move |small_bin| {
+                small_bin
+                    .contains_alignments_bitmap
+                    .contains_aligment_greater_or_equal_to(alignment)
+            })
+            .map(move |small_bin| small_bin.alignment_sub_bins[alignment_index..].iter())
+            .flatten()
+            .filter_map(move |sub_bin| sub_bin.fd)
+    }
+
+    /// Returns an iterator over all the smallbins that you need to check for an
+    /// allocation request with the given parameters, after failing to allocate
+    /// using the aligned suboptimal chunks.
+    ///
+    /// # Safety
+    ///
+    ///  - The size and alignment must be prepared.
+    ///  - The size must be the size of a smallbin.
+    pub fn unaligned_suboptimal_chunks<'a>(
+        &'a self,
+        size: usize,
+        alignment_index: usize,
+    ) -> impl Iterator<Item = FreeChunkPtr> + 'a {
+        let perfect_size_fit_smallbin_index = (size - SMALLEST_SMALLBIN_SIZE) / MIN_ALIGNMENT;
+
+        // if we failed to allocate from the other bin, we should try to allocate from
+        // the smallbins, using chunks that are unaligned.
+        //
+        // there is no point in trying the perfect size fit smallbin, since that one can
+        // fit the allocation only if it is aligned, and we know that it's not
+        // aligned because we already tried that.
+        //
+        // there is also no point on trying the chunks in the range of the smallbin
+        // lookahead because, if we know that they don't have aligned chunks,
+        // then we know that the allocation will be unaligned, which means that
+        // there will be at least `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER` bytes of start
+        // padding, but the lookahead is defined as such that the sizes of the smallbins
+        // in is smaller than the optimal size + `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`.
+        self.small_bins[perfect_size_fit_smallbin_index + 1..SMALLBINS_AMOUNT]
+            .iter()
+            .map(move |small_bin| small_bin.alignment_sub_bins[..alignment_index].iter())
             .flatten()
             .filter_map(move |sub_bin| sub_bin.fd)
     }
