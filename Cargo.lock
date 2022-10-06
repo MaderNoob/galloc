@@ -54,6 +54,7 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "const-random",
+ "galloc",
  "linked_list_allocator",
  "rand",
  "simple-chunk-allocator",

@@ -11,6 +11,7 @@ static_assertions = "1.1.0"
 
 [dev-dependencies]
 rand =  { version = "0.8.5", features = ["small_rng"] }
+galloc = { path = ".", features = ["spin", "allocator"] }
 linked_list_allocator = "0.10.3"
 simple-chunk-allocator = "0.1.5"
 strum = "0.24.1"
@@ -20,3 +21,4 @@ const-random = "0.1.13"
 
 [features]
 default = ["spin"]
+allocator = []

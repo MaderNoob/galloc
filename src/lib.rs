@@ -1,4 +1,8 @@
 #![no_std]
+#![cfg_attr(
+    feature = "allocator",
+    feature(allocator_api, nonnull_slice_from_raw_parts, slice_ptr_get)
+)]
 
 #[cfg(test)]
 #[macro_use]
@@ -1106,5 +1110,93 @@ unsafe impl core::alloc::GlobalAlloc for SpinLockedAllocator {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let mut allocator = self.0.lock();
         allocator.realloc(ptr, layout, new_size)
+    }
+}
+
+#[cfg(feature = "allocator")]
+unsafe impl core::alloc::Allocator for SpinLockedAllocator {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let mut allocator = self.0.lock();
+
+        let ptr =
+            NonNull::new(unsafe { allocator.alloc(layout) }).ok_or(core::alloc::AllocError)?;
+
+        Ok(NonNull::slice_from_raw_parts(ptr, layout.size()))
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, _layout: Layout) {
+        let mut allocator = self.0.lock();
+        allocator.dealloc(ptr.as_ptr());
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let mut allocator = self.0.lock();
+        let chunk_content_addr = ptr.as_ptr() as usize;
+        if is_aligned(chunk_content_addr, new_layout.align()) {
+            let chunk = UsedChunk::from_addr(chunk_content_addr - HEADER_SIZE);
+            allocator.shrink_in_place(chunk, new_layout.size());
+
+            Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()))
+        } else {
+            let new_ptr = self.allocate(new_layout)?;
+
+            // SAFETY: because `new_layout.size()` must be lower than or equal to
+            // `old_layout.size()`, both the old and new memory allocation are valid for reads and
+            // writes for `new_layout.size()` bytes. Also, because the old allocation wasn't yet
+            // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+            // safe. The safety contract for `dealloc` must be upheld by the caller.
+
+            core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
+            self.deallocate(ptr, old_layout);
+
+            Ok(new_ptr)
+        }
+    }
+
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let mut allocator = self.0.lock();
+        let chunk_content_addr = ptr.as_ptr() as usize;
+        if is_aligned(chunk_content_addr, new_layout.align()) {
+            let chunk = UsedChunk::from_addr(chunk_content_addr - HEADER_SIZE);
+            if allocator.try_grow_in_place(chunk, new_layout.size()) {
+                return Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()));
+            }
+        }
+        let new_ptr = self.allocate(new_layout)?;
+
+        // SAFETY: because `new_layout.size()` must be greater than or equal to
+        // `old_layout.size()`, both the old and new memory allocation are valid for reads and
+        // writes for `old_layout.size()` bytes. Also, because the old allocation wasn't yet
+        // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+        // safe. The safety contract for `dealloc` must be upheld by the caller.
+
+        core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
+        self.deallocate(ptr, old_layout);
+
+        Ok(new_ptr)
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+        let result = self.grow(ptr, old_layout, new_layout)?;
+        let ptr = result.as_mut_ptr() as *mut u8;
+        ptr.add(old_layout.size())
+            .write_bytes(0, new_layout.size() - old_layout.size());
+
+        Ok(result)
     }
 }
