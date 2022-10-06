@@ -1,7 +1,11 @@
+use core::marker::PhantomData;
+
+use either::Either;
 use static_assertions::const_assert;
 
 use crate::{
-    chunks::FreeChunkPtr, HEADER_SIZE, MIN_ALIGNMENT, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
+    alignment::is_aligned, chunks::FreeChunkPtr, HEADER_SIZE, MIN_ALIGNMENT,
+    MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
 };
 
 pub const SMALLBINS_AMOUNT: usize = 20;
@@ -110,92 +114,89 @@ impl SmallBins {
         core::cmp::min(alignment_index, MAX_ALIGNMENT_INDEX)
     }
 
-    /// Returns an iterator over all the smallbins that you need to check for an
-    /// allocation request with the given parameters.
+    /// Returns a pointer to an optimal chunk, which will fit the allocation
+    /// without splitting any free chunks from it, meaning that the returned
+    /// chunk can be used with `alloc_aligned_no_end_padding`.
     ///
     /// # Safety
     ///
     ///  - The size and alignment must be prepared.
     ///  - The size must be the size of a smallbin.
-    pub unsafe fn optimal_chunks<'a>(
-        &'a self,
+    pub unsafe fn optimal_chunk(
+        &self,
         size: usize,
         alignment: usize,
         alignment_index: usize,
-    ) -> impl Iterator<Item = OptimalChunk> + 'a {
+    ) -> Option<FreeChunkPtr> {
         let perfect_size_fit_smallbin_index = (size - SMALLEST_SMALLBIN_SIZE) / MIN_ALIGNMENT;
         let used_smallbins_end_index = core::cmp::min(
             perfect_size_fit_smallbin_index + OPTIMAL_SMALLBIN_LOOKAHEAD,
             SMALLBINS_AMOUNT,
         );
-        self.small_bins[perfect_size_fit_smallbin_index..used_smallbins_end_index]
-            .iter()
-            .enumerate()
-            .filter(move |(_, small_bin)| {
-                small_bin
-                    .contains_alignments_bitmap
-                    .contains_aligment_greater_or_equal_to(alignment)
-            })
-            .map(move |(offset_from_optimal_smallbin, smallbin)| {
-                // calculate the size of the current smallbin.
-                let end_padding = offset_from_optimal_smallbin * MIN_ALIGNMENT;
 
-                // get all the sub-bins with a valid alignment
-                smallbin.alignment_sub_bins[alignment_index..]
-                    .iter()
-                    .filter_map(|sub_bin| sub_bin.fd)
-                    .map(move |sub_bin_first_chunk| OptimalChunk {
-                        ptr: sub_bin_first_chunk,
-                        end_padding,
-                    })
-            })
-            .flatten()
+        get_first_aligned_chunk(
+            alignment,
+            alignment_index,
+            &self.small_bins[perfect_size_fit_smallbin_index..used_smallbins_end_index],
+        )
     }
 
-    /// Returns an iterator over all the smallbins that you need to check for an
-    /// allocation request with the given parameters, after failing to allocate
-    /// using the other bin.
+    /// Returns a pointer to an optimal chunk, which will fit the allocation
+    /// without splitting any free chunks from it, meaning that the returned
+    /// chunk can be used with `alloc_aligned_no_end_padding`.
+
+    /// Returns a pointer to an aligned suboptimal chunk, which is aligned to
+    /// the provided alignment, but is large enough that the end padding will be
+    /// enough for an entire free chunk.
     ///
     /// # Safety
     ///
     ///  - The size and alignment must be prepared.
     ///  - The size must be the size of a smallbin.
-    pub fn aligned_suboptimal_chunks<'a>(
+    pub fn aligned_suboptimal_chunk<'a>(
         &'a self,
         size: usize,
         alignment: usize,
         alignment_index: usize,
-    ) -> impl Iterator<Item = FreeChunkPtr> + 'a {
+    ) -> Option<AlignedSuboptimalChunk> {
+        // find the index where the optimal smallbins end.
+        // we want to use the suboptimal smallbins, which are right after the optimal
+        // ones.
         let perfect_size_fit_smallbin_index = (size - SMALLEST_SMALLBIN_SIZE) / MIN_ALIGNMENT;
+        let optimal_smallbins_end = perfect_size_fit_smallbin_index + OPTIMAL_SMALLBIN_LOOKAHEAD;
 
-        // if we failed to allocate from the other bin, we should try to allocate from
-        // the smallbins, using chunks that are unaligned.
-        //
-        // there is no point in trying the perfect size fit smallbin, since that one can
-        // fit the allocation only if it is aligned, and we know that it's not
-        // aligned because we already tried that.
-        //
-        // there is also no point on trying the chunks in the range of the smallbin
-        // lookahead because, if we know that they don't have aligned chunks,
-        // then we know that the allocation will be unaligned, which means that
-        // there will be at least `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER` bytes of start
-        // padding, but the lookahead is defined as such that the sizes of the smallbins
-        // in is smaller than the optimal size + `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`.
-        self.small_bins[perfect_size_fit_smallbin_index + 1..SMALLBINS_AMOUNT]
-            .iter()
-            .filter(move |small_bin| {
-                small_bin
-                    .contains_alignments_bitmap
-                    .contains_aligment_greater_or_equal_to(alignment)
-            })
-            .map(move |small_bin| small_bin.alignment_sub_bins[alignment_index..].iter())
-            .flatten()
-            .filter_map(move |sub_bin| sub_bin.fd)
+        // if the optimal smallbins reach the end of the smallbins, then there are no
+        // suboptimal smallbins
+        if optimal_smallbins_end >= SMALLBINS_AMOUNT {
+            return None;
+        }
+
+        let mut chunk_ptr = get_first_aligned_chunk(
+            alignment,
+            alignment_index,
+            &self.small_bins[optimal_smallbins_end..],
+        )?;
+
+        let end_padding = unsafe { chunk_ptr.as_mut() }.size() - size;
+
+        Some(AlignedSuboptimalChunk {
+            chunk_ptr,
+            end_padding,
+        })
     }
 
-    /// Returns an iterator over all the smallbins that you need to check for an
-    /// allocation request with the given parameters, after failing to allocate
-    /// using the aligned suboptimal chunks.
+    /// Returns an iterator over all unaligned suboptimal chunks for the
+    /// provided allocation requirements. When allocating this chunks, at least
+    /// 1 free chunk of start padding will be created, and optionally another
+    /// end padding chunk may need to be created.
+    ///
+    /// The returned chunks are guaranteed to be unaligned, and may not be large
+    /// enough for allocating the given allocation requirements after finding an
+    /// aligned address.
+    ///
+    /// If there are no suboptimal smallbins at all, the function returns
+    /// `None`, otherwise it returns an iterator over the unaligned
+    /// suboptimal chunks.
     ///
     /// # Safety
     ///
@@ -204,28 +205,62 @@ impl SmallBins {
     pub fn unaligned_suboptimal_chunks<'a>(
         &'a self,
         size: usize,
+        alignment: usize,
         alignment_index: usize,
-    ) -> impl Iterator<Item = FreeChunkPtr> + 'a {
+    ) -> Option<
+        Either<impl Iterator<Item = FreeChunkPtr> + 'a, impl Iterator<Item = FreeChunkPtr> + 'a>,
+    > {
+        // find the index where the optimal smallbins end.
+        // we want to use the suboptimal smallbins, which are right after the optimal
+        // ones.
         let perfect_size_fit_smallbin_index = (size - SMALLEST_SMALLBIN_SIZE) / MIN_ALIGNMENT;
+        let optimal_smallbins_end = perfect_size_fit_smallbin_index + OPTIMAL_SMALLBIN_LOOKAHEAD;
 
-        // if we failed to allocate from the other bin, we should try to allocate from
-        // the smallbins, using chunks that are unaligned.
-        //
-        // there is no point in trying the perfect size fit smallbin, since that one can
-        // fit the allocation only if it is aligned, and we know that it's not
-        // aligned because we already tried that.
-        //
-        // there is also no point on trying the chunks in the range of the smallbin
-        // lookahead because, if we know that they don't have aligned chunks,
-        // then we know that the allocation will be unaligned, which means that
-        // there will be at least `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER` bytes of start
-        // padding, but the lookahead is defined as such that the sizes of the smallbins
-        // in is smaller than the optimal size + `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`.
-        self.small_bins[perfect_size_fit_smallbin_index + 1..SMALLBINS_AMOUNT]
-            .iter()
-            .map(move |small_bin| small_bin.alignment_sub_bins[..alignment_index].iter())
-            .flatten()
-            .filter_map(move |sub_bin| sub_bin.fd)
+        // if the optimal smallbins reach the end of the smallbins, then there are no
+        // suboptimal smallbins.
+        if optimal_smallbins_end >= SMALLBINS_AMOUNT {
+            return None;
+        }
+
+        // check all the suboptimal smallbins, which start right where the optimal
+        // smallbins end.
+        let smallbins_to_check = self.small_bins[optimal_smallbins_end..].iter();
+
+        if alignment_index > MAX_SPECIFIC_ALIGNMENT_INDEX {
+            // if the alignment index is non-specific, check all the chunks in the non
+            // specific alignment sub-bin, and find the ones that are unaligned.
+            Some(Either::Left(
+                smallbins_to_check
+                    .map(move |small_bin| {
+                        // take all the chunks from the non-specific alignment sub-bin. we need all
+                        // chunks and not only the first because each chunk has a different
+                        // alignment, so even if one doesn't work, the other
+                        // might work.
+                        small_bin.alignment_sub_bins[MAX_ALIGNMENT_INDEX].chunks()
+                    })
+                    .flatten()
+                    .filter(move |&(mut chunk_ptr)| {
+                        let chunk = unsafe { chunk_ptr.as_mut() };
+
+                        // find all chunks that are unaligned
+                        unsafe { !is_aligned(chunk.content_addr(), alignment) }
+                    }),
+            ))
+        } else {
+            // if the alignment index is specific, only check alignment sub-bins with
+            // alignment index lower than `alignment_index`, because we know for sure that
+            // only these chunks will be unaligned.
+            Some(Either::Right(
+                smallbins_to_check
+                    .map(move |small_bin| {
+                        // only take alignment sub-bins which are unaligned, which means that their
+                        // index is smaller than `alignment_index`.
+                        small_bin.alignment_sub_bins[..alignment_index].iter()
+                    })
+                    .flatten()
+                    .filter_map(move |sub_bin| sub_bin.fd),
+            ))
+        }
     }
 
     /// Returns fd and bk pointers for inserting a free chunk into the smallbin
@@ -276,14 +311,65 @@ impl SmallBins {
     }
 }
 
-/// Information about an optimal chunk for some allocation requirements.
-pub struct OptimalChunk {
-    /// A pointer to the chunk.
-    pub ptr: FreeChunkPtr,
+/// Returns the first chunk which is aligned to the given alignment
+/// from the provided smallbins.
+///
+/// There is no need to check if the provided smallbins contain chunks with the
+/// provided alignment, this function will do it automatically using the
+/// contains alignment bitmaps.
+fn get_first_aligned_chunk(
+    alignment: usize,
+    alignment_index: usize,
+    smallbins: &[SmallBin],
+) -> Option<FreeChunkPtr> {
+    let smallbins_containing_alignment = smallbins.iter().filter(move |small_bin| {
+        small_bin
+            .contains_alignments_bitmap
+            .contains_aligment_greater_or_equal_to(alignment)
+    });
+    if alignment_index > MAX_SPECIFIC_ALIGNMENT_INDEX {
+        // if the alignment index is a non specific alignment index, it
+        // means that we can't know for sure which chunks in the
+        // alignment sub-bins will be well aligned, so we must
+        // find one that is aligned.
+        smallbins_containing_alignment
+            .map(move |smallbin| {
+                // the only valid alignment sub-bin is the non specific one
+                // we need to check all chunks in this sub-bin, because each one has a different
+                // alignment and we can't know which ones are aligned.
+                smallbin.alignment_sub_bins[MAX_ALIGNMENT_INDEX].chunks()
+            })
+            .flatten()
+            .filter(|&(mut chunk_ptr)| {
+                let chunk = unsafe { chunk_ptr.as_mut() };
 
-    /// The end padding that will be left if this chunk is used for the given
-    /// allocation requirements.
-    pub end_padding: usize,
+                // find all chunks that are aligned.
+                // we are checking chunks from the non-specific alignment sub-bin, so we can't
+                // know if they are aligned or not without checking.
+                unsafe { is_aligned(chunk.content_addr(), alignment) }
+            })
+            .next()
+    } else {
+        smallbins_containing_alignment
+            .filter(move |small_bin| {
+                small_bin
+                    .contains_alignments_bitmap
+                    .contains_aligment_greater_or_equal_to(alignment)
+            })
+            .map(move |smallbin| {
+                // get all the sub-bins with a valid alignment
+                smallbin.alignment_sub_bins[alignment_index..]
+                    .iter()
+                    .filter_map(|sub_bin| {
+                        // for each sub-bin, get the first chunk.
+                        // it is enough to only check the first chunk because all chunks have the
+                        // same size and alignment.
+                        sub_bin.fd
+                    })
+            })
+            .flatten()
+            .next()
+    }
 }
 
 /// A small bin, which is made up of alignment sub-bins.
@@ -322,11 +408,34 @@ impl AlignmentSubBin {
     pub const fn new() -> Self {
         Self { fd: None }
     }
+
+    /// Returns an iterator over the chunks in this alignment sub-bin.
+    pub fn chunks(&self) -> AlignmentSubBinChunks {
+        AlignmentSubBinChunks {
+            cur: self.fd,
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl Default for AlignmentSubBin {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// An iterator over the chunks in an alignment sub-bin
+pub struct AlignmentSubBinChunks<'a> {
+    cur: Option<FreeChunkPtr>,
+    phantom: PhantomData<&'a ()>,
+}
+impl<'a> Iterator for AlignmentSubBinChunks<'a> {
+    type Item = FreeChunkPtr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut cur = self.cur?;
+        self.cur = unsafe { cur.as_mut() }.fd;
+        Some(cur)
     }
 }
 
@@ -363,4 +472,18 @@ impl ContainsAlignmentsBitmap {
         let alignment = 1 << alignment_index;
         self.bitmap &= !(alignment as AlignmentSubBinsBitmapType);
     }
+}
+
+/// Information about an aligned suboptimal chunk for some allocation
+/// requirements.
+pub struct AlignedSuboptimalChunk {
+    /// A pointer to the chunk
+    pub chunk_ptr: FreeChunkPtr,
+
+    /// The amount of end padding that will be left when this chunk will be
+    /// allocated for the allocation requirements that were provided.
+    ///
+    /// This is guaranteed to be greater than or equal to
+    /// `MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`.
+    pub end_padding: usize,
 }

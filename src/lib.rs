@@ -291,22 +291,11 @@ impl Allocator {
         layout_align: usize,
         alignment_index: usize,
     ) -> Option<NonNull<u8>> {
-        let mut optimal_chunk = {
-            let mut optimal_chunks =
-                self.smallbins
-                    .optimal_chunks(layout_size, layout_align, alignment_index);
-            optimal_chunks.next()?
-        };
-        let chunk = optimal_chunk.ptr.as_mut();
-        if optimal_chunk.end_padding < MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
-            Some(self.alloc_aligned_no_end_padding(chunk))
-        } else {
-            Some(self.alloc_aligned_split_end_padding_chunk(
-                layout_size,
-                optimal_chunk.end_padding,
-                chunk,
-            ))
-        }
+        let mut optimal_chunk =
+            self.smallbins
+                .optimal_chunk(layout_size, layout_align, alignment_index)?;
+        let chunk = optimal_chunk.as_mut();
+        Some(self.alloc_aligned_no_end_padding(chunk))
     }
 
     /// Tries to allocate a chunk from the other bin for the given allocation
@@ -374,17 +363,15 @@ impl Allocator {
         layout_align: usize,
         alignment_index: usize,
     ) -> Option<NonNull<u8>> {
-        let mut allocated_chunk = {
-            let mut aligned_suboptimal_chunks = self.smallbins.aligned_suboptimal_chunks(
-                layout_size,
-                layout_align,
-                alignment_index,
-            );
+        let mut aligned_suboptimal_chunk =
+            self.smallbins
+                .aligned_suboptimal_chunk(layout_size, layout_align, alignment_index)?;
 
-            aligned_suboptimal_chunks.next()?
-        };
-
-        Some(self.alloc_aligned(layout_size, allocated_chunk.as_mut()))
+        Some(self.alloc_aligned_split_end_padding_chunk(
+            layout_size,
+            aligned_suboptimal_chunk.end_padding,
+            aligned_suboptimal_chunk.chunk_ptr.as_mut(),
+        ))
     }
 
     /// Tries to allocate a chunk from the unaligned sub-optimal chunks for the
@@ -406,7 +393,7 @@ impl Allocator {
         let (allocated_chunk, aligned_start_addr) = {
             let mut chunks_that_can_allocate_unaligned = self
                 .smallbins
-                .unaligned_suboptimal_chunks(layout_size, alignment_index)
+                .unaligned_suboptimal_chunks(layout_size, layout_align, alignment_index)?
                 .filter_map(|mut chunk_ptr| {
                     let chunk = chunk_ptr.as_mut();
                     // the chunk is not aligned

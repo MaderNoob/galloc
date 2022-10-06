@@ -42,7 +42,7 @@ fn random_alloc_dealloc_realloc() {
                     && size_left >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER)
             {
                 let size = random_size(&mut rng, size_left);
-                let alignment = 1 << rng.gen_range(0..=10);
+                let alignment = 1 << rng.gen_range(0..=14);
                 let ptr = unsafe {
                     guard
                         .allocator
@@ -50,6 +50,9 @@ fn random_alloc_dealloc_realloc() {
                 };
 
                 if !ptr.is_null() {
+                    let addr = ptr as usize;
+                    assert!(unsafe { is_aligned(addr, alignment) });
+
                     allocations.push((ptr, size, alignment));
 
                     // adjust the size left
