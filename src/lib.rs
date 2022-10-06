@@ -107,15 +107,10 @@ impl Allocator {
         // no need to update the next chunk because there is no next chunk, this chunk
         // covers the entire heap.
         let chunk_size = aligned_size - HEADER_SIZE;
-        let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-            chunk_size,
-            SmallBins::alignment_index_of_chunk_content_addr(aligned_heap_start_addr + HEADER_SIZE),
-        );
         let _ = FreeChunk::create_new_without_updating_next_chunk(
             aligned_heap_start_addr,
             chunk_size,
-            fd,
-            bk,
+            self,
         );
 
         // update the heap end address.
@@ -161,9 +156,15 @@ impl Allocator {
     /// Returns fd and bk pointers for inserting a new free chunk to its
     /// matching bin.
     ///
+    /// In case the chunk should be inserted into a smallbin, updates the
+    /// smallbin's bitmap to indicate that it now contains that chunk.
+    ///
     /// # Safety
     ///
     ///  - `chunk_size` must be the size of an actual chunk.
+    ///  - After calling this function, the free chunk must be inserted using
+    ///    the fd and bk pointers, otherwise the smallbins' bitmaps might be in
+    ///    an invalid state.
     unsafe fn get_fd_and_bk_pointers_for_inserting_new_free_chunk(
         &mut self,
         chunk_size: usize,
@@ -204,14 +205,14 @@ impl Allocator {
                     )
                 } else {
                     (
-                        // SAFETY: the fake chunkwill be used as the fd of some other chunk, but
+                        // SAFETY: the fake chunk will be used as the fd of some other chunk, but
                         // chunks never access the header of their fd, only their fd and bk, so
                         // this is safe.
                         Some(unsafe { self.fake_chunk_of_other_bin_ptr() }),
                         self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
-            },
+            }
             // if the other bin is empty, put this chunk as the first chunk in the bin.
             None => (
                 // SAFETY: the fake chunk will be used as the fd of some other chunk, but chunks
@@ -245,9 +246,11 @@ impl Allocator {
             None
         };
 
+        // if the allocation size is the size of a smallbin, allocate from optimal
+        // chunks from the smallbins.
         if let Some(alignment_index) = alignment_index_if_size_is_smallbin_size {
             if let Some(ptr) =
-                self.alloc_from_optimal_chunks(layout_size, layout_align, alignment_index)
+                self.alloc_from_optimal_chunk(layout_size, layout_align, alignment_index)
             {
                 return ptr.as_ptr();
             }
@@ -257,6 +260,8 @@ impl Allocator {
             return ptr.as_ptr();
         }
 
+        // if the allocation size is the size of a smallbin, allocate from suboptimal
+        // chunks from the smallbins.
         if let Some(alignment_index) = alignment_index_if_size_is_smallbin_size {
             if let Some(ptr) = self.alloc_from_aligned_suboptimal_chunks(
                 layout_size,
@@ -278,14 +283,14 @@ impl Allocator {
         core::ptr::null_mut()
     }
 
-    /// Tries to allocate a chunk from the optimal chunks for the given
-    /// allocation requirements.
+    /// Tries to allocate an optimal chunks for the given allocation
+    /// requirements.
     ///
     /// # Safety
     ///
     ///  - The size and align must have been prepared.
     ///  - The size must be the size of a small bin.
-    unsafe fn alloc_from_optimal_chunks(
+    unsafe fn alloc_from_optimal_chunk(
         &mut self,
         layout_size: usize,
         layout_align: usize,
@@ -311,9 +316,11 @@ impl Allocator {
     ) -> Option<NonNull<u8>> {
         // try to allocate from the other bin.
         let fake_chunk_of_other_bin_ptr = self.fake_chunk_of_other_bin_ptr();
-        let mut maybe_cur_chunk_ptr = self.first_free_chunk_in_other_bin();
 
-        while let Some(mut cur_chunk_ptr) = maybe_cur_chunk_ptr {
+        // the other bin is circular so the fd will never be `None`.
+        let mut cur_chunk_ptr = self.fake_chunk_of_other_bin.fd.unwrap();
+
+        loop {
             // if the current chunk is the fake chunk of the other bin, we reached the end
             // of the list.
             if cur_chunk_ptr == fake_chunk_of_other_bin_ptr {
@@ -323,12 +330,15 @@ impl Allocator {
 
             // check if the chunk is large enough
             if cur_chunk.size() >= layout_size {
-                // SAFETY: we know that the chunk is large enough
                 if is_aligned(cur_chunk.content_addr(), layout_align) {
-                    // already aligned
+                    // the chunk is already aligned
+                    //
+                    // SAFETY: we know that the chunk is large enough
                     return Some(self.alloc_aligned(layout_size, cur_chunk_ptr.as_mut()));
                 } else {
                     // the chunk is not aligned
+
+                    // check if we can use the current chunk for an unaligned allocation.
                     let cur_chunk_ref = cur_chunk_ptr.as_mut();
                     if let Some(aligned_start_addr) =
                         self.can_alloc_unaligned(layout_size, layout_align, cur_chunk_ref)
@@ -342,7 +352,8 @@ impl Allocator {
                 }
             }
 
-            maybe_cur_chunk_ptr = cur_chunk.fd();
+            // the other bin is circular so the fd will never be `None`.
+            cur_chunk_ptr = cur_chunk.fd().unwrap();
         }
 
         None
@@ -367,6 +378,8 @@ impl Allocator {
             self.smallbins
                 .aligned_suboptimal_chunk(layout_size, layout_align, alignment_index)?;
 
+        // the aligned suboptimal chunks are aligned, but are also large enough so that
+        // an end padding chunk must be created.
         Some(self.alloc_aligned_split_end_padding_chunk(
             layout_size,
             aligned_suboptimal_chunk.end_padding,
@@ -377,8 +390,8 @@ impl Allocator {
     /// Tries to allocate a chunk from the unaligned sub-optimal chunks for the
     /// given allocation requirements.
     ///
-    /// This strategy should be called after trying the aligned suboptimal
-    /// chunks.
+    /// This strategy should be called after trying to find an aligned
+    /// suboptimal chunk.
     ///
     /// # Safety
     ///
@@ -395,8 +408,11 @@ impl Allocator {
                 .smallbins
                 .unaligned_suboptimal_chunks(layout_size, layout_align, alignment_index)?
                 .filter_map(|mut chunk_ptr| {
+                    // for each unaligned suboptimal chunk, check if it can fit the allocation
+                    // requirements.
+
                     let chunk = chunk_ptr.as_mut();
-                    // the chunk is not aligned
+
                     if let Some(aligned_start_addr) =
                         self.can_alloc_unaligned(layout_size, layout_align, chunk_ptr.as_mut())
                     {
@@ -406,6 +422,7 @@ impl Allocator {
                     }
                 });
 
+            // get the first chunk which can fit the allocation requirements.
             chunks_that_can_allocate_unaligned.next()?
         };
 
@@ -430,7 +447,7 @@ impl Allocator {
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
-            },
+            }
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -446,12 +463,16 @@ impl Allocator {
                 next_chunk_free.unlink(&mut self.smallbins);
 
                 // mark the chunk as free.
+                //
+                // no need to update the next chunk, because it already knows that its prev is
+                // free, because before marking `chunk` as free, the next chunk's previous chunk
+                // was `next_chunk_free`.
                 let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
                     chunk.0.size(),
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
-            },
+            }
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it includes the entire
@@ -469,7 +490,7 @@ impl Allocator {
                 if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            },
+            }
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -495,7 +516,11 @@ impl Allocator {
                         + next_chunk_free.size(),
                     self,
                 );
-            },
+
+                // also, there's no need to update the next chunk of
+                // `next_free_chunk`, because that chunk already knows that its
+                // prev is free.
+            }
         }
     }
 
@@ -512,18 +537,30 @@ impl Allocator {
             return ptr;
         }
 
-        // if reallocation in place fails, use the default implementation of realloc.
-        //
-        // SAFETY: the caller must ensure that the `new_size` does not overflow.
-        // `layout.align()` comes from a `Layout` and is thus guaranteed to be valid.
+        // if reallocation in place fails, realloc a new region for and copy the data there.
         let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+        self.realloc_new_region(ptr, layout, new_layout)
+    }
+
+    /// Resizes an allocation previously returned from `alloc` or `realloc`, by allocating
+    /// a new memory region for it, copying the memory, and dealloacting the provided pointer.
+    pub unsafe fn realloc_new_region(
+        &mut self,
+        ptr: *mut u8,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> *mut u8 {
         // SAFETY: the caller must ensure that `new_layout` is greater than zero.
         let new_ptr = self.alloc(new_layout);
         if !new_ptr.is_null() {
             // SAFETY: the previously allocated block cannot overlap the newly allocated
             // block. The safety contract for `dealloc` must be upheld by the
             // caller.
-            core::ptr::copy_nonoverlapping(ptr, new_ptr, core::cmp::min(layout.size(), new_size));
+            core::ptr::copy_nonoverlapping(
+                ptr,
+                new_ptr,
+                core::cmp::min(old_layout.size(), new_layout.size()),
+            );
             self.dealloc(ptr);
         }
         new_ptr
@@ -540,19 +577,8 @@ impl Allocator {
         previously_requested_size: usize,
         new_size: usize,
     ) -> bool {
-        let chunk_size = chunk.0.size();
-
         if new_size > previously_requested_size {
             // the user requested to grow his allocation.
-
-            // sometimes chunks are bigger than their content due to end padding that's not
-            // big enough to fit a chunk, check if that's the case.
-            if chunk_size >= new_size {
-                // if the chunk is already large enough, no need to do anything.
-                return true;
-            }
-
-            // if the chunk is not large enough, try to grow it in place.
             self.try_grow_in_place(chunk, new_size)
         } else {
             // the user requested to shrink his allocation, shrink in place.
@@ -569,18 +595,25 @@ impl Allocator {
     ///
     /// # Safety
     ///
-    /// `new_size` must be greater than the chunk's size, and must have been
-    /// prepared.
+    /// `new_size` must have been prepared.
     unsafe fn try_grow_in_place(&mut self, chunk: UsedChunkRef, new_size: usize) -> bool {
-        // to grow this chunk we need its next chunk to be free, make sure that the next
-        // chunk is free.
+        // sometimes chunks are bigger than their content due to end padding that's not
+        // big enough to fit a chunk, check if the chunk is already large enough for the
+        // new size.
+        if chunk.0.size() >= new_size {
+            // if the chunk is already large enough, no need to do anything.
+            return true;
+        }
+
+        // to grow this chunk in place we need its next chunk to be free, make sure that
+        // the next chunk is free.
         let next_chunk_free = match chunk.next_chunk_if_free(self.heap_end_addr) {
             Some(next_chunk_free) => next_chunk_free,
 
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            },
+            }
         };
 
         // calculate the new end addresss of the chunk.
@@ -592,7 +625,7 @@ impl Allocator {
         //
         // if the new end address is beyond the next free chunk, we can't grow in place,
         // because the chunk after the next chunk must be used because there are no 2
-        // adjacent free chunks.
+        // adjacent free chunks, and the next chunk alone is not enough.
         let next_chunk_end_addr = next_chunk_free.end_addr();
         if new_end_addr > next_chunk_end_addr {
             return false;
@@ -624,9 +657,6 @@ impl Allocator {
             // resize `chunk` to the desired size. this will make `chunk` include all the
             // space up to where the new free chunk was just created.
             chunk.set_size(new_size);
-
-            // we have successfully grew the chunk in place.
-            true
         } else {
             // the space left at the end of the next free chunk is not enough to
             // store a free chunk, so just include that space when growing this
@@ -637,8 +667,8 @@ impl Allocator {
             //
             // we must also update the prev in use bit of the next chunk of the
             // next chunk, because its prev is now `chunk`, which is in use,
-            // while before calling this function its prev was
-            // `next_chunk_free`, which is free.
+            // while before calling this function its prev was `next_chunk_free`, which is
+            // free.
             if let Some(next_chunk_of_next_chunk_addr) =
                 next_chunk_free.header.next_chunk_addr(self.heap_end_addr)
             {
@@ -650,10 +680,10 @@ impl Allocator {
 
             // make sure that it includes all of the next chunk
             chunk.set_size(next_chunk_end_addr - chunk.content_addr());
-
-            // we have successfully grew the chunk in place.
-            true
         }
+
+        // we have successfully grew the chunk in place.
+        true
     }
 
     /// Shrinks the given chunk in place, to the given new size. Please note
@@ -683,7 +713,7 @@ impl Allocator {
 
                 // resize `chunk` to the desired size.
                 chunk.set_size(new_size);
-            },
+            }
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -698,40 +728,24 @@ impl Allocator {
                     // but now its prev is a free chunk.
                     let end_padding_chunk_size = space_left_at_end - HEADER_SIZE;
 
-                    // calculate the content address of the end padding chunk so that we can
-                    // calculate the alignment index of its content.
-                    //
-                    // the end padding chunk starts right where the new end address is, and the
-                    // content comes right after the header.
-                    let end_padding_chunk_content_addr = new_end_addr + HEADER_SIZE;
-
-                    // SAFETY: the provided chunk size is the size of an actual chunk, and the
-                    // alignment returned from `Chunk::alignment` is always a power of 2.
-                    let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-                        end_padding_chunk_size,
-                        SmallBins::alignment_index_of_chunk_content_addr(
-                            end_padding_chunk_content_addr,
-                        ),
-                    );
                     let _ = FreeChunk::create_new_and_update_next_chunk(
+                        // the end padding chunk starts right where the new end address is, and the
+                        // content comes right after the header.
                         new_end_addr,
                         end_padding_chunk_size,
-                        fd,
-                        bk,
-                        self.heap_end_addr,
+                        self,
                     );
 
                     // resize `chunk` to the desired size.
                     chunk.set_size(new_size);
                 } else {
                     // if we don't have enough space to create a free chunk
-                    // there, just leave it there. this
-                    // prioritizes runtime efficiency over memory
-                    // efficiency, because it prevents copying the entire
-                    // memory, but it wastes a little bit of
+                    // there, just leave it there. this prioritizes runtime
+                    // efficiency over memory efficiency, because it prevents
+                    // copying the entire memory, but it wastes a little bit of
                     // memory (up to 32 bytes).
                 }
-            },
+            }
         }
     }
 
@@ -743,6 +757,10 @@ impl Allocator {
     /// address of the allocated chunk, which can then be used to allocate the
     /// chunk by calling `alloc_unaligned`. Otherwise, if the chunk can't be
     /// used, returns `None`.
+    ///
+    /// # Safety
+    ///
+    /// The size and alignment must have been prepared.
     unsafe fn can_alloc_unaligned(
         &self,
         layout_size: usize,
@@ -814,34 +832,23 @@ impl Allocator {
         allocated_chunk_addr: usize,
         allocated_chunk_size: usize,
     ) -> NonNull<u8> {
-        // check if we need any end padding
+        // check if we need any end padding, and if that padding is large enough to
+        // store an entire free chunk there.
         let end_padding = allocated_chunk_size - layout_size;
-        if end_padding > 0 {
-            // check if the end padding is large enough to hold a free chunk
-            if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
-                // if the end padding is large enough to hold a free chunk, create a chunk
-                // there.
-                //
-                // this is safe because we checked that `end_padding` is big enough
-                self.alloc_unaligned_after_splitting_start_padding_split_end_padding_chunk(
-                    layout_size,
-                    end_padding,
-                    allocated_chunk_addr,
-                )
-            } else {
-                // if the end padding is not large enough to hold a free chunk, consider it a
-                // part of the allocated chunk. this is a little wasteful, but
-                // it prevents us from returning `null` from the allocator even
-                // when we have enough space.
-
-                // this case can be considered the same as allocating without any end padding.
-                self.alloc_unaligned_after_splitting_start_padding_no_end_padding(
-                    allocated_chunk_addr,
-                    allocated_chunk_size,
-                )
-            }
+        if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
+            // if the end padding is large enough to hold a free chunk, create a chunk
+            // there and allocate the rest.
+            //
+            // this is safe because we checked that `end_padding` is big enough
+            self.alloc_unaligned_after_splitting_start_padding_split_end_padding_chunk(
+                layout_size,
+                end_padding,
+                allocated_chunk_addr,
+            )
         } else {
-            // if there is no end padding
+            // if there is no end padding, or the end padding is not large enough to store
+            // an entire free chunk there, just include it in the allocated chunk instead of
+            // splitting an end padding chunk for it.
             self.alloc_unaligned_after_splitting_start_padding_no_end_padding(
                 allocated_chunk_addr,
                 allocated_chunk_size,
@@ -855,7 +862,7 @@ impl Allocator {
     /// # Safety
     ///
     ///  - `allocated_chunk_addr` must be a valid non-null memory address.
-    ///  - `allocated_chunk_size` must be aligned to [`CHUNK_SIZE_ALIGNMENT`]
+    ///  - `allocated_chunk_size` must be aligned.
     ///  - the range of memory
     ///    `allocated_chunk_addr..allocated_chunk_addr+allocated_chunk_size`
     ///    must be valid and must not be used by any other chunk.
@@ -886,9 +893,8 @@ impl Allocator {
     /// # Safety
     ///
     ///  - `end_padding` must be greater than or equal to
-    ///    [`MIN_FREE_CHUNK_SIZE`].
+    ///    [`MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`].
     ///  - `allocated_chunk_addr` must be a valid non-null memory address.
-    ///  - `allocated_chunk_size` must be aligned to [`CHUNK_SIZE_ALIGNMENT`]
     ///  - the range of memory
     ///    `allocated_chunk_addr..allocated_chunk_addr+allocated_chunk_size`
     ///    must be valid and must not be used by any other chunk.
@@ -901,24 +907,17 @@ impl Allocator {
     ) -> NonNull<u8> {
         // the end address of the allocated chunk that will be returned to the user.
         // this is also the start address of the end padding chunk.
-        let allocated_chunk_end_addr = allocated_chunk_addr + HEADER_SIZE + layout_size;
+        let end_padding_chunk_start_addr = allocated_chunk_addr + HEADER_SIZE + layout_size;
 
         // create an end padding chunk.
         //
         // there is no need to update the next chunk because it's prev in use bit is
         // already set to false, as it should be.
         let end_padding_chunk_size = end_padding - HEADER_SIZE;
-        let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-            end_padding_chunk_size,
-            SmallBins::alignment_index_of_chunk_content_addr(
-                allocated_chunk_end_addr + HEADER_SIZE,
-            ),
-        );
         let _ = FreeChunk::create_new_without_updating_next_chunk(
-            allocated_chunk_end_addr,
+            end_padding_chunk_start_addr,
             end_padding_chunk_size,
-            fd,
-            bk,
+            self,
         );
 
         // now create a used chunk for the allocated chunk.
@@ -948,27 +947,19 @@ impl Allocator {
     unsafe fn alloc_aligned(&mut self, layout_size: usize, chunk: FreeChunkRef) -> NonNull<u8> {
         let cur_chunk_size = chunk.size();
 
-        // check if we need any end padding
+        // check if we need any end padding, and if that end padding is large enough to
+        // store an entire free chunk there.
         let end_padding = cur_chunk_size - layout_size;
-        if end_padding > 0 {
-            // check if the end padding is large enough to hold a free chunk
-            if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
-                // if the end padding is large enough to hold a free chunk, create a chunk
-                // there.
-                //
-                // this is safe because we checked that `end_padding` is big enough
-                self.alloc_aligned_split_end_padding_chunk(layout_size, end_padding, chunk)
-            } else {
-                // if the end padding is not large enough to hold a free chunk, consider it a
-                // part of the allocated chunk. this is a little wasteful, but
-                // it prevents us from returning `null` from the allocator even
-                // when we have enough space.
-                //
-                // this case can be considered the same as allocating without any end padding.
-                self.alloc_aligned_no_end_padding(chunk)
-            }
+        if end_padding >= MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER {
+            // if the end padding is large enough to hold a free chunk, create a chunk
+            // there.
+            //
+            // this is safe because we checked that `end_padding` is big enough
+            self.alloc_aligned_split_end_padding_chunk(layout_size, end_padding, chunk)
         } else {
-            // if there is no end padding
+            // if there is no end padding, or the end padding is not large enough to store
+            // an entire free chunk there, consider the end padding a part of the allocated
+            // chunk.
             self.alloc_aligned_no_end_padding(chunk)
         }
     }
@@ -988,7 +979,7 @@ impl Allocator {
     /// # Safety
     ///
     ///  - `end_padding` must be greater than or equal to
-    ///    [`MIN_FREE_CHUNK_SIZE`].
+    ///    [`MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER`].
     ///  - the provided size must have been prepared.
     unsafe fn alloc_aligned_split_end_padding_chunk(
         &mut self,
@@ -998,12 +989,12 @@ impl Allocator {
     ) -> NonNull<u8> {
         // the end address of the allocated chunk that will be returned to the user.
         // this is also the start address of the end padding chunk.
-        let allocated_chunk_end_addr = chunk.content_addr() + layout_size;
+        let end_padding_chunk_start_addr = chunk.content_addr() + layout_size;
 
         // unlink the current chunk and mark it as used.
         //
-        // SAFETY: the next chunk is the end padding chunk, and was just created as a
-        // free chunk, and when creating a free chunk its prev in use bit is
+        // SAFETY: the next chunk is the end padding chunk, and will soon be created as
+        // a free chunk, and when creating a free chunk its prev in use bit is
         // automatically set to true, so no need to update it.
         //
         // also please note that if we tried to update the next chunk here it would
@@ -1017,17 +1008,10 @@ impl Allocator {
         // there is no need to update the next chunk because it's prev in use bit is
         // already set to false, as it should be.
         let end_padding_chunk_size = end_padding - HEADER_SIZE;
-        let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-            end_padding_chunk_size,
-            SmallBins::alignment_index_of_chunk_content_addr(
-                allocated_chunk_end_addr + HEADER_SIZE,
-            ),
-        );
         let _ = FreeChunk::create_new_without_updating_next_chunk(
-            allocated_chunk_end_addr,
+            end_padding_chunk_start_addr,
             end_padding_chunk_size,
-            fd,
-            bk,
+            self,
         );
 
         // shrink cur chunk to only include the content and not the end padding.
@@ -1124,22 +1108,14 @@ unsafe impl core::alloc::Allocator for SpinLockedAllocator {
             let chunk = UsedChunk::from_addr(chunk_content_addr - HEADER_SIZE);
             allocator.shrink_in_place(chunk, new_layout.size());
 
-            Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()))
-        } else {
-            let new_ptr = self.allocate(new_layout)?;
-
-            // SAFETY: because `new_layout.size()` must be lower than or equal to
-            // `old_layout.size()`, both the old and new memory allocation are valid for
-            // reads and writes for `new_layout.size()` bytes. Also, because the
-            // old allocation wasn't yet deallocated, it cannot overlap
-            // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
-            // safe. The safety contract for `dealloc` must be upheld by the caller.
-
-            core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
-            self.deallocate(ptr, old_layout);
-
-            Ok(new_ptr)
+            return Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()));
         }
+
+        // we can't shrink in place, so realloc a new region and copy the data there.
+        let ptr = NonNull::new(allocator.realloc_new_region(ptr.as_ptr(), old_layout, new_layout))
+            .ok_or(core::alloc::AllocError)?;
+
+        Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()))
     }
 
     unsafe fn grow(
@@ -1156,19 +1132,11 @@ unsafe impl core::alloc::Allocator for SpinLockedAllocator {
                 return Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()));
             }
         }
-        let new_ptr = self.allocate(new_layout)?;
+        // we can't grow in place, so realloc a new region and copy the data there.
+        let ptr = NonNull::new(allocator.realloc_new_region(ptr.as_ptr(), old_layout, new_layout))
+            .ok_or(core::alloc::AllocError)?;
 
-        // SAFETY: because `new_layout.size()` must be greater than or equal to
-        // `old_layout.size()`, both the old and new memory allocation are valid for
-        // reads and writes for `old_layout.size()` bytes. Also, because the old
-        // allocation wasn't yet deallocated, it cannot overlap `new_ptr`. Thus,
-        // the call to `copy_nonoverlapping` is safe. The safety contract for
-        // `dealloc` must be upheld by the caller.
-
-        core::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
-        self.deallocate(ptr, old_layout);
-
-        Ok(new_ptr)
+        Ok(NonNull::slice_from_raw_parts(ptr, new_layout.size()))
     }
 
     unsafe fn grow_zeroed(

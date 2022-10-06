@@ -133,7 +133,7 @@ impl UsedChunk {
     ///
     ///  - `addr` must be a valid non-null memory address which is not used by
     ///    any other chunk.
-    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
+    ///  - `size` must have been prepared.
     ///  - The chunk's next chunk, if any, must be updated that its previous
     ///    chunk is now in use.
     pub unsafe fn create_new_without_updating_next_chunk(
@@ -143,7 +143,7 @@ impl UsedChunk {
     ) -> UsedChunkRef {
         let ptr = addr as *mut UsedChunk;
 
-        // write the chunk header and content
+        // write the chunk header
         *ptr = UsedChunk(Chunk::new_unchecked(size, false, prev_in_use));
 
         &mut *ptr
@@ -156,7 +156,7 @@ impl UsedChunk {
     ///
     ///  - `addr` must be a valid non-null memory address which is not used by
     ///    any other chunk.
-    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
+    ///  - `size` must have been prepared.
     pub unsafe fn create_new(
         addr: usize,
         size: usize,
@@ -201,12 +201,11 @@ impl UsedChunk {
         }
     }
 
-    /// Sets the size of this used chunk to the given value. The size must be
-    /// aligned to `CHUNK_SIZE_ALIGNMENT`.
+    /// Sets the size of this used chunk to the given value.
     ///
     /// # Safety
     ///
-    /// Panics if the new size is not divisble by 4.
+    /// The new size must have been prepared.
     pub fn set_size(&mut self, new_size: usize) {
         self.0.set_size(new_size)
     }
@@ -217,8 +216,7 @@ impl UsedChunk {
     /// # Safety
     ///
     /// This function doesn't update the next chunk that this chunk is now free,
-    /// you must make sure that the next chunk's prev in use flag is
-    /// correct.
+    /// you must make sure that the next chunk's prev in use flag is correct.
     pub unsafe fn mark_as_free_without_updating_next_chunk(
         &mut self,
         fd: Option<FreeChunkPtr>,
@@ -360,9 +358,8 @@ impl FreeChunk {
         *self.postfix_size() = new_size;
     }
 
-    /// Marks this free chunk as used and updates its next chunk, but without
-    /// updating the linked list of free chunks, and without updating the next
-    /// chunk.
+    /// Marks this free chunk as used, but without updating the linked list of free chunks,
+    /// and without updating the next chunk.
     ///
     /// # Safety
     ///
@@ -389,10 +386,10 @@ impl FreeChunk {
         heap_end_addr: usize,
     ) -> UsedChunkRef {
         // mark as used
-        self.header.set_is_free(false);
+        let as_used = self.mark_as_used_without_updating_freelist_and_next_chunk();
 
         // update next chunk, if there is one
-        if let Some(next_chunk_addr) = self.header.next_chunk_addr(heap_end_addr) {
+        if let Some(next_chunk_addr) = as_used.0.next_chunk_addr(heap_end_addr) {
             let next_chunk = UsedChunk::from_addr(next_chunk_addr);
             next_chunk.0.set_prev_in_use(true);
         }
@@ -435,7 +432,9 @@ impl FreeChunk {
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
     ///  - The chunk's next chunk, if any, must be updated that its previous
     ///    chunk is now free.
-    pub unsafe fn create_new_without_updating_next_chunk(
+    ///  - The provided fd and bk pointers must be pointers to chunks in the bin
+    ///    which matches this chunk's size.
+    pub unsafe fn create_new_without_updating_next_chunk_using_custom_fd_and_bk(
         addr: usize,
         size: usize,
         fd: Option<FreeChunkPtr>,
@@ -474,8 +473,33 @@ impl FreeChunk {
     /// The new chunk will be marked as free, and its `prev_in_use` flag will be
     /// set to `true`, because no 2 free chunks can be adjacent.
     ///
-    /// The new chunk will also be linked into the linked list between fd and
-    /// bk.
+    /// The new chunk will be inserted into a bin that matches its size.
+    ///
+    /// # Safety
+    ///
+    ///  - `addr` must be a valid non-null memory address which is not used by
+    ///    any other chunk.
+    ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
+    ///  - The chunk's next chunk, if any, must be updated that its previous
+    ///    chunk is now free.
+    pub unsafe fn create_new_without_updating_next_chunk(
+        addr: usize,
+        size: usize,
+        allocator: &mut Allocator,
+    ) -> FreeChunkRef {
+        let (fd, bk) = allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
+            size,
+            SmallBins::alignment_index_of_chunk_content_addr(addr + HEADER_SIZE),
+        );
+        FreeChunk::create_new_without_updating_next_chunk_using_custom_fd_and_bk(addr, size, fd, bk)
+    }
+
+    /// Creates a new free chunk at the given address, with the given size.
+    ///
+    /// The new chunk will be marked as free, and its `prev_in_use` flag will be
+    /// set to `true`, because no 2 free chunks can be adjacent.
+    ///
+    /// The new chunk will be inserted into a bin that matches its size.
     ///
     /// The next chunk after this free chunk will be updated that its prev chunk
     /// is now free.
@@ -488,15 +512,12 @@ impl FreeChunk {
     pub unsafe fn create_new_and_update_next_chunk(
         addr: usize,
         size: usize,
-        fd: Option<FreeChunkPtr>,
-        ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-        heap_end_addr: usize,
+        allocator: &mut Allocator,
     ) -> FreeChunkRef {
         // this is safe because right after it we update the next chunk
-        let free_chunk =
-            FreeChunk::create_new_without_updating_next_chunk(addr, size, fd, ptr_to_fd_of_bk);
+        let free_chunk = FreeChunk::create_new_without_updating_next_chunk(addr, size, allocator);
 
-        if let Some(next_chunk_addr) = free_chunk.header.next_chunk_addr(heap_end_addr) {
+        if let Some(next_chunk_addr) = free_chunk.header.next_chunk_addr(allocator.heap_end_addr) {
             Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
         }
 
@@ -515,8 +536,8 @@ impl FreeChunk {
     /// unlinking, because this function uses the chunk's size to find the
     /// smallbin that it's in.
     ///
-    /// You must make sure to make use of this chunk
-    /// and keep track of it, do not lose the memory.
+    /// You must make sure to make use of this chunk and keep track of it,
+    /// do not lose the memory.
     pub unsafe fn unlink(&mut self, smallbins: &mut SmallBins) {
         // remember if this chunk was the last chunk in the freelist.
         //
@@ -553,19 +574,23 @@ impl FreeChunk {
         // if this chunk wasn't last, there's no way that unlinking it could have
         // emptied the sub-bin.
         if was_last_chunk {
-            // SAFETY: the given size is the size of an actual chunk, which must have
+            // SAFETY: we know that this chunk is in a smallbin because its `fd` was
+            // `None`, which can only occur when a chunk is in a smallbin, since the
+            // other bin uses a circular linked list, so the `fd` of chunks in it is
+            // never `None`.
+            //
+            // also, the given size is the size of an actual chunk, which must have
             // already been prepared.
-            if let Some(smallbin_index) = SmallBins::smallbin_index(self.size()) {
-                let alignment_index = {
-                    // SAFETY: the provided content address is the content address of an actual
-                    // chunk, so it must be aligned.
-                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
-                };
-                smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
-                    smallbin_index,
-                    alignment_index,
-                );
-            }
+            let smallbin_index = SmallBins::smallbin_index_unchecked(self.size());
+            let alignment_index = {
+                // SAFETY: the provided content address is the content address of an actual
+                // chunk, so it must be aligned.
+                SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
+            };
+            smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
+                smallbin_index,
+                alignment_index,
+            );
         }
     }
 
@@ -629,16 +654,12 @@ impl FreeChunk {
 
             // create a new free chunk at the new location and insert it into the correct
             // bin.
-            let (fd, bk) = allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
-                new_size,
-                SmallBins::alignment_index_of_chunk_content_addr(new_addr + HEADER_SIZE),
-            );
-            FreeChunk::create_new_without_updating_next_chunk(new_addr, new_size, fd, bk)
+            FreeChunk::create_new_without_updating_next_chunk(new_addr, new_size, allocator)
         } else {
             // no need to change bins.
             //
             // create a new chunk and replace `self` in the freelist with that new chunk.
-            FreeChunk::create_new_without_updating_next_chunk(
+            FreeChunk::create_new_without_updating_next_chunk_using_custom_fd_and_bk(
                 new_addr,
                 new_size,
                 self.fd,
