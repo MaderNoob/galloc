@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use const_random::const_random;
 use rand::{rngs::SmallRng, seq::SliceRandom, Rng, SeedableRng};
 
 pub fn push_to_vec(duration: f32) -> usize {
@@ -58,7 +59,7 @@ pub fn alloc_until_full_then_dealloc(duration: f32) -> usize {
 }
 
 pub fn random_actions(duration: f32) -> usize {
-    let mut rng = SmallRng::seed_from_u64(67753);
+    let mut rng = SmallRng::seed_from_u64(const_random!(u64));
 
     let start = Instant::now();
 
@@ -75,26 +76,24 @@ pub fn random_actions(duration: f32) -> usize {
                 if let Some(allocation) = AllocationWrapper::new(size, alignment) {
                     v.push(allocation)
                 }
-            },
+            }
             1 => {
                 if !v.is_empty() {
                     let index = rng.gen_range(0..v.len());
                     v.swap_remove(index);
                 }
-            },
+            }
             2 => {
                 if let Some(random_allocation) = v.choose_mut(&mut rng) {
                     let size = rng.gen_range(100..=10000);
                     random_allocation.realloc(size);
                 }
-            },
+            }
             _ => unreachable!(),
         }
 
         score += 1
     }
-
-    drop(v);
 
     score
 }
@@ -103,7 +102,7 @@ pub fn heap_exhaustion(duration: f32) -> usize {
     let start = Instant::now();
 
     let mut score = 0;
-    let mut rng = SmallRng::seed_from_u64(100);
+    let mut rng = SmallRng::seed_from_u64(const_random!(u64));
 
     let mut v = Vec::new();
 
@@ -113,12 +112,12 @@ pub fn heap_exhaustion(duration: f32) -> usize {
             Some(allocation) => {
                 v.push(allocation);
                 score += 1
-            },
+            }
             None => {
                 // heap was exhausted, penalize the score
                 std::thread::sleep(Duration::from_millis(20));
                 v = Vec::new();
-            },
+            }
         }
     }
 

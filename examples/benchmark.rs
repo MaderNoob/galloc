@@ -211,8 +211,8 @@ fn benchmark_all() {
         benchmarks::push_to_vec_and_alloc_between_each_push,
         benchmarks::alloc_dealloc,
         benchmarks::alloc_until_full_then_dealloc,
-        benchmarks::random_actions,
-        benchmarks::heap_exhaustion
+        benchmarks::heap_exhaustion,
+        benchmarks::random_actions
     );
     const BENCHMARKS_AMOUNT: usize = BENCHMARKS.len();
 
@@ -222,6 +222,8 @@ fn benchmark_all() {
     const ALLOCATORS_AMOUNT: usize = ALLOCATORS.len();
 
     const TIME_STEPS_AMOUNT: usize = 10;
+
+    let _ = std::fs::create_dir("./benchmark_results/");
 
     let mut data: ArrayVec<
         (

@@ -16,6 +16,7 @@ simple-chunk-allocator = "0.1.5"
 strum = "0.24.1"
 strum_macros = "0.24.1"
 arrayvec = "0.7.2"
+const-random = "0.1.13"
 
 [features]
 default = ["spin"]
