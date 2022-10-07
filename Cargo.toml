@@ -2,6 +2,13 @@
 name = "galloc"
 version = "0.1.0"
 edition = "2021"
+authors = ["Roee Shoshani", "Guy Nir"]
+description = "A blazingly fast memory allocator usable for `no_std` environments."
+repository = "https://github.com/MaderNoob/galloc"
+keywords = ["allocator", "no_std", "malloc", "heap", "kernel"]
+categories = ["memory-management", "no-std", "algorithms", "data-structures", "embedded"]
+license = "MIT"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
