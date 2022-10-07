@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use average::Mean;
 use rand::{seq::SliceRandom, Rng};
 
 const CHUNKS_AMOUNT: usize = 1 << 20;
@@ -24,9 +25,10 @@ const TIME_STEPS_AMOUNT: usize = 10;
 const MILLIS_PER_SECOND: usize = 1000;
 const TIME_STEP_MILLIS: usize = MILLIS_PER_SECOND / TIME_STEPS_AMOUNT;
 
-// We need to create a wrapper over chunk allocator and implement `GlobalAllocator`
-// manually for it, because the implementation provided by the `simple-chunk-allocator`
-// crate just panics on memory exhasution instead of returning `null`.
+// We need to create a wrapper over chunk allocator and implement
+// `GlobalAllocator` manually for it, because the implementation provided by the
+// `simple-chunk-allocator` crate just panics on memory exhasution instead of
+// returning `null`.
 #[derive(Debug)]
 pub struct GlobalChunkAllocator<
     'a,
@@ -112,6 +114,14 @@ static CHUNK_ALLOCATOR: GlobalChunkAllocator<'static, CHUNK_SIZE> =
     });
 
 fn main() {
+    const BENCHMARK_RESULTS_DIR: &str = "./benchmark_results";
+    const TRIALS_AMOUNT: usize = 50;
+
+    let _ = std::fs::remove_dir_all(BENCHMARK_RESULTS_DIR);
+
+    // create a directory for the benchmark results.
+    let _ = std::fs::create_dir(BENCHMARK_RESULTS_DIR);
+
     let benchmarks = benchmark_list!(random_actions, heap_exhaustion);
     let allocators = allocator_list!(
         init_galloc,
@@ -125,8 +135,13 @@ fn main() {
                 .step_by(TIME_STEP_MILLIS)
                 .map(|i| {
                     let duration = Duration::from_millis(i as u64);
-                    let allocator_ref = (allocator.init_fn)();
-                    (benchmark.benchmark_fn)(duration, allocator_ref)
+                    let mean: Mean = (0..TRIALS_AMOUNT)
+                        .map(|_| {
+                            let allocator_ref = (allocator.init_fn)();
+                            (benchmark.benchmark_fn)(duration, allocator_ref) as f64
+                        })
+                        .collect();
+                    mean.mean()
                 })
                 .map(|score| score.to_string());
 
@@ -139,7 +154,11 @@ fn main() {
         // remove the last newline.
         csv.pop();
 
-        std::fs::write(format!("benchmark_results/{}.csv", benchmark.name), csv).unwrap();
+        std::fs::write(
+            format!("{}/{}.csv", BENCHMARK_RESULTS_DIR, benchmark.name),
+            csv,
+        )
+        .unwrap();
     }
 }
 
@@ -188,19 +207,19 @@ pub fn random_actions(duration: Duration, allocator: &dyn GlobalAlloc) -> usize 
                 if let Some(allocation) = AllocationWrapper::new(size, alignment, allocator) {
                     v.push(allocation)
                 }
-            }
+            },
             1 => {
                 if !v.is_empty() {
                     let index = rng.gen_range(0..v.len());
                     v.swap_remove(index);
                 }
-            }
+            },
             2 => {
                 if let Some(random_allocation) = v.choose_mut(&mut rng) {
                     let size = rng.gen_range(100..=10000);
                     random_allocation.realloc(size);
                 }
-            }
+            },
             _ => unreachable!(),
         }
 
@@ -225,14 +244,14 @@ pub fn heap_exhaustion(duration: Duration, allocator: &dyn GlobalAlloc) -> usize
             Some(allocation) => {
                 v.push(allocation);
                 score += 1
-            }
+            },
             None => {
                 // heap was exhausted, penalize the score by sleeping.
                 std::thread::sleep(Duration::from_millis(30));
 
                 // free all allocation to empty the heap.
                 v = Vec::new();
-            }
+            },
         }
     }
 

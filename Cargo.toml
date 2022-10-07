@@ -15,11 +15,13 @@ rand =  { version = "0.8.5", features = ["small_rng"] }
 galloc = { path = ".", features = ["spin", "allocator"] }
 linked_list_allocator = "0.10.3"
 simple-chunk-allocator = "0.1.5"
-strum = "0.24.1"
-strum_macros = "0.24.1"
-arrayvec = "0.7.2"
-const-random = "0.1.13"
+average = "0.13.1"
 
 [features]
 default = ["spin"]
 allocator = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
