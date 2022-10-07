@@ -212,7 +212,7 @@ impl Allocator {
                         self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
-            }
+            },
             // if the other bin is empty, put this chunk as the first chunk in the bin.
             None => (
                 // SAFETY: the fake chunk will be used as the fd of some other chunk, but chunks
@@ -447,7 +447,7 @@ impl Allocator {
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
-            }
+            },
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -472,7 +472,7 @@ impl Allocator {
                     SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
                 );
                 let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
-            }
+            },
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it includes the entire
@@ -490,7 +490,7 @@ impl Allocator {
                 if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            }
+            },
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -520,7 +520,7 @@ impl Allocator {
                 // also, there's no need to update the next chunk of
                 // `next_free_chunk`, because that chunk already knows that its
                 // prev is free.
-            }
+            },
         }
     }
 
@@ -537,14 +537,16 @@ impl Allocator {
             return ptr;
         }
 
-        // if reallocation in place fails, realloc a new region for and copy the data there.
+        // if reallocation in place fails, realloc a new region for and copy the data
+        // there.
         let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
         self.realloc_new_region(ptr, layout, new_layout)
     }
 
-    /// Resizes an allocation previously returned from `alloc` or `realloc`, by allocating
-    /// a new memory region for it, copying the memory, and dealloacting the provided pointer.
-    pub unsafe fn realloc_new_region(
+    /// Resizes an allocation previously returned from `alloc` or `realloc`, by
+    /// allocating a new memory region for it, copying the memory, and
+    /// dealloacting the provided pointer.
+    unsafe fn realloc_new_region(
         &mut self,
         ptr: *mut u8,
         old_layout: Layout,
@@ -613,7 +615,7 @@ impl Allocator {
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            }
+            },
         };
 
         // calculate the new end addresss of the chunk.
@@ -713,7 +715,7 @@ impl Allocator {
 
                 // resize `chunk` to the desired size.
                 chunk.set_size(new_size);
-            }
+            },
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -745,7 +747,7 @@ impl Allocator {
                     // copying the entire memory, but it wastes a little bit of
                     // memory (up to 32 bytes).
                 }
-            }
+            },
         }
     }
 
