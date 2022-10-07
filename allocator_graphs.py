@@ -2,9 +2,12 @@ import matplotlib.pyplot as plt
 import glob
 import itertools
 import os
+from qbstyles import mpl_style
 
 BENCHMARK_RESULTS_DIR = 'benchmark_results/'
 BENCHMARK_RESULT_GRAPHS_DIR = 'benchmark_result_graphs/'
+
+mpl_style(True)
 
 def get_benchmark_data(filename):
     with open(filename, 'r') as f:
@@ -38,12 +41,10 @@ def plot_benchmark(filename):
         full_diff_str += f'{k1} - {k2}: {diff}%\n'
             
     plt.figtext(0.133, 0.75, full_diff_str, fontsize=10)
-            
-    plt.savefig(BENCHMARK_RESULT_GRAPHS_DIR + test_name + '.png')
     plt.show()
 
 def percentage_difference(a,b):
-    return (a -b)/(b/2) * 100
+    return a / b * 100
 
 def difference_average(plt_a, plt_b):
     differences = []
