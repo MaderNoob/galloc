@@ -59,21 +59,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 
 [[package]]
-name = "galloc"
-version = "0.1.0"
-dependencies = [
- "average",
- "either",
- "galloc",
- "linked_list_allocator",
- "rand",
- "simple-chunk-allocator",
- "spin",
- "static_assertions",
- "x86",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -82,6 +67,21 @@ dependencies = [
  "cfg-if",
  "libc",
  "wasi",
+]
+
+[[package]]
+name = "good_memory_allocator"
+version = "0.1.0"
+dependencies = [
+ "average",
+ "either",
+ "good_memory_allocator",
+ "linked_list_allocator",
+ "rand",
+ "simple-chunk-allocator",
+ "spin",
+ "static_assertions",
+ "x86",
 ]
 
 [[package]]

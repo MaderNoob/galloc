@@ -105,7 +105,8 @@ macro_rules! allocator_list {
     }
 }
 
-static mut GALLOC_ALLOCATOR: galloc::SpinLockedAllocator = galloc::SpinLockedAllocator::empty();
+static mut GALLOC_ALLOCATOR: good_memory_allocator::SpinLockedAllocator =
+    good_memory_allocator::SpinLockedAllocator::empty();
 static LINKED_LIST_ALLOCATOR: linked_list_allocator::LockedHeap =
     linked_list_allocator::LockedHeap::empty();
 static CHUNK_ALLOCATOR: GlobalChunkAllocator<'static, CHUNK_SIZE> =
@@ -171,7 +172,7 @@ fn init_linked_list_allocator() -> &'static dyn GlobalAlloc {
 
 fn init_galloc() -> &'static dyn GlobalAlloc {
     unsafe {
-        GALLOC_ALLOCATOR = galloc::SpinLockedAllocator::empty();
+        GALLOC_ALLOCATOR = good_memory_allocator::SpinLockedAllocator::empty();
     }
     unsafe { GALLOC_ALLOCATOR.init(HEAP.as_ptr() as usize, HEAP_SIZE) }
     unsafe { &GALLOC_ALLOCATOR }

@@ -69,7 +69,7 @@ fn main() {
 
     let bench_res_2 = benchmark_allocator(&mut linked_list_allocator);
 
-    let mut galloc_allocator = galloc::SpinLockedAllocator::empty();
+    let mut galloc_allocator = good_memory_allocator::SpinLockedAllocator::empty();
     unsafe {
         galloc_allocator.init(HEAP_MEMORY.0.as_ptr() as usize, HEAP_SIZE);
     }

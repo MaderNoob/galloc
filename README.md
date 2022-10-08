@@ -1,9 +1,7 @@
-# galloc
+# galloc - `good_memory_allocator`
 
-### The good memory allocator.
-
-[![crate](https://img.shields.io/crates/v/galloc.svg)](https://crates.io/crates/galloc)
-[![docs](https://docs.rs/galloc/badge.svg)](https://docs.rs/galloc)
+[![crate](https://img.shields.io/crates/v/good_memory_allocator.svg)](https://crates.io/crates/good_memory_allocator)
+[![docs](https://docs.rs/good_memory_allocator/badge.svg)](https://docs.rs/good_memory_allocator)
 
 This is a linked list allocator, inspired by the dlmalloc algorithm, to be used in `no_std` environments such as operating system kernels.
 The overhead for each allocation is a single `usize`.
@@ -15,7 +13,7 @@ The allocator is heavily tested with test cases covering almost all code paths; 
 Create a static allocator:
 
 ```rust
-use galloc::SpinLockedAllocator;
+use good_memory_allocator::SpinLockedAllocator;
 
 #[global_allocator]
 static ALLOCATOR: SpinLockedAllocator = SpinLockedAllocator::empty();
