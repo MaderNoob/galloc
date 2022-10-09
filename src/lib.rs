@@ -23,16 +23,15 @@ use bins::SmallBins;
 use chunks::*;
 use static_assertions::const_assert;
 
-pub const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
-pub const USIZE_SIZE: usize = core::mem::size_of::<usize>();
-pub const MIN_ALIGNMENT: usize = if USIZE_ALIGNMENT < 8 {
+const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
+const USIZE_SIZE: usize = core::mem::size_of::<usize>();
+const MIN_ALIGNMENT: usize = if USIZE_ALIGNMENT < 8 {
     8
 } else {
     USIZE_ALIGNMENT
 };
-pub const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize =
-    core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
-pub const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
+const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize = core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
+const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 
 // `MIN_ALIGNMENT` must be larger than 4, so that storing the size as a
 // `DivisibleBy4Usize` is safe.
