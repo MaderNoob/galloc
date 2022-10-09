@@ -4,6 +4,41 @@
     feature(allocator_api, nonnull_slice_from_raw_parts, slice_ptr_get)
 )]
 
+//! This is a linked list allocator, inspired by the dlmalloc algorithm, to be
+//! used in `no_std` environments such as operating system kernels. The overhead
+//! for each allocation is a single `usize`. The implementation prioritizes
+//! runtime efficiency over memory efficiency, but also provides very good
+//! memory utilization. The allocator is heavily tested with test cases covering
+//! almost all code paths; fuzzing is used to cover the rest.
+//!
+//! ## Usage
+//!
+//! Create a static allocator:
+//!
+//! ```rust
+//! use good_memory_allocator::SpinLockedAllocator;
+//!
+//! #[global_allocator]
+//! static ALLOCATOR: SpinLockedAllocator = SpinLockedAllocator::empty();
+//! ```
+//!
+//! Before using this allocator, you need to initialize it:
+//!
+//! ```rust
+//! pub fn init_heap() {
+//!     unsafe {
+//!         ALLOCATOR.init(heap_start, heap_size);
+//!     }
+//! }
+//! ```
+//!
+//! ## Features
+//!
+//! - **`spin`** (default): Provide a `SpinLockedAllocator` type that implements
+//!   the `GlobalAlloc` trait by using a spinlock.
+//! - **`allocator`**: Provides an implementation of the unstable `Allocator`
+//!   trait for the `SpinLockedAllocator` type.
+
 #[cfg(test)]
 #[macro_use]
 extern crate std;
