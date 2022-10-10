@@ -112,10 +112,3 @@ RESULTS OF BENCHMARK: Galloc
 ```
 
 As you can see, `galloc` outperformed both of them in both test cases. This is especially noticable in the 10 seconds test.
-
-### An important note about `linked-list-allocator`
-
-The `linked-list-allocator` crate currently has [a bug](https://github.com/rust-osdev/linked-list-allocator/issues/66) where it loses heap memory over time, eventually reaching heap exhaustion even after freeing all memory.
-For this reason, we do not consider `linked-list-allocator` production ready. 
-
-`galloc` on the other hand is heavily tested and, as far as we are aware, has no such bugs.

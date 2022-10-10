@@ -1,6 +1,6 @@
 [package]
 name = "good_memory_allocator"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Roee Shoshani", "Guy Nir"]
 description = "A blazingly fast memory allocator usable for `no_std` environments."
