@@ -1,46 +1,28 @@
 use core::marker::PhantomData;
 
 use either::Either;
-use static_assertions::const_assert;
 
 use crate::{
-    alignment::is_aligned, chunks::FreeChunkPtr, HEADER_SIZE, MIN_ALIGNMENT,
-    MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
+    alignment::is_aligned,
+    chunks::FreeChunkPtr,
+    smallest_type_which_has_at_least_n_bits::{
+        ContainsAlignmentsBitmapTrait, SmallestTypeWhichHasAtLeastNBits,
+        SmallestTypeWhichHasAtLeastNBitsStruct, SmallestTypeWhichHasAtLeastNBitsTrait,
+    },
+    HEADER_SIZE, MIN_ALIGNMENT, MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER,
 };
 
-pub const SMALLBINS_AMOUNT: usize = 20;
-pub const ALIGNMENT_SUB_BINS_AMOUNT: usize = 8;
+/// The default amount of smallbins used by the allocator.
+pub const DEFAULT_SMALLBINS_AMOUNT: usize = 20;
+
+/// The default amount of alignemnt sub-bins used by the allocator.
+pub const DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT: usize = 8;
 
 pub const MIN_ALIGNMENT_LOG2: usize = unsafe { log2_of_power_of_2(MIN_ALIGNMENT) };
 
-/// The max alignment index that has a specific sub-bin in which all chunks have
-/// that alignment.
-pub const MAX_SPECIFIC_ALIGNMENT_INDEX: usize = ALIGNMENT_SUB_BINS_AMOUNT - 1 - 1;
-
-/// The max alignment that has a specific sub-bin in which all chunks have that
-/// alignment.
-pub const MAX_SPECIFIC_ALIGNMENT: usize = 1 << (MAX_SPECIFIC_ALIGNMENT_INDEX + MIN_ALIGNMENT_LOG2);
-
-pub const MAX_ALIGNMENT_INDEX: usize = ALIGNMENT_SUB_BINS_AMOUNT - 1;
-
-type AlignmentSubBinsBitmapType = u8;
-
 const SMALLEST_SMALLBIN_SIZE: usize = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER - HEADER_SIZE;
-const LARGEST_SMALLBIN_SIZE: usize =
-    SMALLEST_SMALLBIN_SIZE + (SMALLBINS_AMOUNT - 1) * MIN_ALIGNMENT;
 
 const OPTIMAL_SMALLBIN_LOOKAHEAD: usize = MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER / MIN_ALIGNMENT;
-
-// make sure that the alignment sub-bins bitmap type has enough bits to store
-// information about each alingment sub-bin.
-const_assert!(core::mem::size_of::<AlignmentSubBinsBitmapType>() * 8 >= ALIGNMENT_SUB_BINS_AMOUNT);
-
-// make sure that the alignment sub-bins bitmap type is optimal.
-// if this causes an error, use a smaller type for it.
-const_assert!(
-    core::mem::size_of::<AlignmentSubBinsBitmapType>() == 1
-        || (core::mem::size_of::<AlignmentSubBinsBitmapType>() * 8 / 2 < ALIGNMENT_SUB_BINS_AMOUNT)
-);
 
 /// Computes log2(x) where x is a power of 2.
 ///
@@ -53,11 +35,34 @@ pub const unsafe fn log2_of_power_of_2(x: usize) -> usize {
 
 /// A collection of small bins, used in the allocator.
 #[derive(Debug)]
-pub struct SmallBins {
-    pub(crate) small_bins: [SmallBin; SMALLBINS_AMOUNT],
+pub struct SmallBins<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
+    pub(crate) small_bins: [SmallBin<ALIGNMENT_SUB_BINS_AMOUNT>; SMALLBINS_AMOUNT],
 }
 
-impl SmallBins {
+impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+    SmallBins<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
+    const LARGEST_SMALLBIN_SIZE: usize = if SMALLBINS_AMOUNT == 0 {
+        0
+    } else {
+        SMALLEST_SMALLBIN_SIZE + (SMALLBINS_AMOUNT - 1) * MIN_ALIGNMENT
+    };
+    pub const MAX_ALIGNMENT_INDEX: usize = ALIGNMENT_SUB_BINS_AMOUNT - 1;
+    /// The max alignment that has a specific sub-bin in which all chunks have
+    /// that alignment.
+    pub const MAX_SPECIFIC_ALIGNMENT: usize =
+        1 << (Self::MAX_SPECIFIC_ALIGNMENT_INDEX + MIN_ALIGNMENT_LOG2);
+    /// The max alignment index that has a specific sub-bin in which all chunks
+    /// have that alignment.
+    pub const MAX_SPECIFIC_ALIGNMENT_INDEX: usize = ALIGNMENT_SUB_BINS_AMOUNT - 1 - 1;
+
     /// Creates a new set of empty smallbins.
     pub const fn new() -> Self {
         Self {
@@ -71,7 +76,7 @@ impl SmallBins {
     ///
     /// The size must have been prepared.
     pub unsafe fn is_smallbin_size(size: usize) -> bool {
-        size <= LARGEST_SMALLBIN_SIZE
+        size <= Self::LARGEST_SMALLBIN_SIZE
     }
 
     /// Returns the index of the smallbin containing chunks of the given size,
@@ -81,7 +86,7 @@ impl SmallBins {
     ///
     /// The size must have been prepared.
     pub unsafe fn smallbin_index(size: usize) -> Option<usize> {
-        if size > LARGEST_SMALLBIN_SIZE {
+        if size > Self::LARGEST_SMALLBIN_SIZE {
             return None;
         }
 
@@ -106,8 +111,8 @@ impl SmallBins {
     ///
     /// `alignment` must be a power of 2.
     pub unsafe fn alignment_index(alignment: usize) -> usize {
-        if alignment > MAX_SPECIFIC_ALIGNMENT {
-            return MAX_ALIGNMENT_INDEX;
+        if alignment > Self::MAX_SPECIFIC_ALIGNMENT {
+            return Self::MAX_ALIGNMENT_INDEX;
         }
 
         log2_of_power_of_2(alignment) - MIN_ALIGNMENT_LOG2
@@ -123,10 +128,11 @@ impl SmallBins {
         let largest_power_of_2_that_divides_addr = chunk_content_addr.trailing_zeros() as usize;
         let alignment_index = largest_power_of_2_that_divides_addr - MIN_ALIGNMENT_LOG2;
 
-        core::cmp::min(alignment_index, MAX_ALIGNMENT_INDEX)
+        core::cmp::min(alignment_index, Self::MAX_ALIGNMENT_INDEX)
     }
 
-    /// Returns the smallbin index whose size is a perfect fit for the provided size.
+    /// Returns the smallbin index whose size is a perfect fit for the provided
+    /// size.
     ///
     /// # Safety
     ///
@@ -155,7 +161,7 @@ impl SmallBins {
             SMALLBINS_AMOUNT,
         );
 
-        get_first_aligned_chunk(
+        Self::get_first_aligned_chunk(
             alignment,
             alignment_index,
             &self.small_bins[perfect_size_fit_smallbin_index..used_smallbins_end_index],
@@ -192,7 +198,7 @@ impl SmallBins {
             return None;
         }
 
-        let mut chunk_ptr = get_first_aligned_chunk(
+        let mut chunk_ptr = Self::get_first_aligned_chunk(
             alignment,
             alignment_index,
             &self.small_bins[optimal_smallbins_end..],
@@ -250,7 +256,7 @@ impl SmallBins {
         // smallbins end.
         let smallbins_to_check = self.small_bins[optimal_smallbins_end..].iter();
 
-        if alignment_index > MAX_SPECIFIC_ALIGNMENT_INDEX {
+        if alignment_index > Self::MAX_SPECIFIC_ALIGNMENT_INDEX {
             // if the alignment index is non-specific, check all the chunks in the non
             // specific alignment sub-bin, and find the ones that are unaligned.
             Some(Either::Left(
@@ -259,7 +265,7 @@ impl SmallBins {
                         // take all the chunks from the non-specific alignment sub-bin. we need all
                         // chunks and not only the first because each chunk has a different
                         // alignment, so even if one doesn't work, the other might work.
-                        small_bin.alignment_sub_bins[MAX_ALIGNMENT_INDEX].chunks()
+                        small_bin.alignment_sub_bins[Self::MAX_ALIGNMENT_INDEX].chunks()
                     })
                     .flatten()
                     .filter(move |&(mut chunk_ptr)| {
@@ -338,76 +344,84 @@ impl SmallBins {
                 .unset_contains_alignment(alignment_index)
         }
     }
-}
 
-/// Returns the first chunk which is aligned to the given alignment
-/// from the provided smallbins.
-///
-/// There is no need to check if the provided smallbins contain chunks with the
-/// provided alignment, this function will do it automatically using the
-/// contains alignment bitmaps.
-fn get_first_aligned_chunk(
-    alignment: usize,
-    alignment_index: usize,
-    smallbins: &[SmallBin],
-) -> Option<FreeChunkPtr> {
-    if alignment_index > MAX_SPECIFIC_ALIGNMENT_INDEX {
-        // if the alignment index is a non specific alignment index, it
-        // means that we can't know for sure which chunks in the
-        // alignment sub-bins will be well aligned, so we must
-        // find one that is aligned.
-        smallbins
-            .iter()
-            .map(move |smallbin| {
-                // the only valid alignment sub-bin is the non specific one
-                // we need to check all chunks in this sub-bin, because each one has a different
-                // alignment and we can't know which ones are aligned.
-                smallbin.alignment_sub_bins[MAX_ALIGNMENT_INDEX].chunks()
-            })
-            .flatten()
-            .filter(|&(mut chunk_ptr)| {
-                let chunk = unsafe { chunk_ptr.as_mut() };
+    /// Returns the first chunk which is aligned to the given alignment
+    /// from the provided smallbins.
+    ///
+    /// There is no need to check if the provided smallbins contain chunks with
+    /// the provided alignment, this function will do it automatically using
+    /// the contains alignment bitmaps.
+    fn get_first_aligned_chunk(
+        alignment: usize,
+        alignment_index: usize,
+        smallbins: &[SmallBin<ALIGNMENT_SUB_BINS_AMOUNT>],
+    ) -> Option<FreeChunkPtr> {
+        if alignment_index > Self::MAX_SPECIFIC_ALIGNMENT_INDEX {
+            // if the alignment index is a non specific alignment index, it
+            // means that we can't know for sure which chunks in the
+            // alignment sub-bins will be well aligned, so we must
+            // find one that is aligned.
+            smallbins
+                .iter()
+                .map(move |smallbin| {
+                    // the only valid alignment sub-bin is the non specific one
+                    // we need to check all chunks in this sub-bin, because each one has a different
+                    // alignment and we can't know which ones are aligned.
+                    smallbin.alignment_sub_bins[Self::MAX_ALIGNMENT_INDEX].chunks()
+                })
+                .flatten()
+                .filter(|&(mut chunk_ptr)| {
+                    let chunk = unsafe { chunk_ptr.as_mut() };
 
-                // find all chunks that are aligned.
-                // we are checking chunks from the non-specific alignment sub-bin, so we can't
-                // know if they are aligned or not without checking.
-                unsafe { is_aligned(chunk.content_addr(), alignment) }
-            })
-            .next()
-    } else {
-        smallbins
-            .iter()
-            .filter(move |small_bin| {
-                // only take the smallbins which contain chunks with an alignment greater than or
-                // equal to the provided alignment.
-                small_bin
-                    .contains_alignments_bitmap
-                    .contains_aligment_greater_or_equal_to(alignment)
-            })
-            .map(move |smallbin| {
-                // get all the sub-bins with a valid alignment
-                smallbin.alignment_sub_bins[alignment_index..]
-                    .iter()
-                    .filter_map(|sub_bin| {
-                        // for each sub-bin, get the first chunk.
-                        // it is enough to only check the first chunk because all chunks have the
-                        // same size and alignment.
-                        sub_bin.fd
-                    })
-            })
-            .flatten()
-            .next()
+                    // find all chunks that are aligned.
+                    // we are checking chunks from the non-specific alignment sub-bin, so we can't
+                    // know if they are aligned or not without checking.
+                    unsafe { is_aligned(chunk.content_addr(), alignment) }
+                })
+                .next()
+        } else {
+            smallbins
+                .iter()
+                .filter(move |small_bin| {
+                    // only take the smallbins which contain chunks with an alignment greater than
+                    // or equal to the provided alignment.
+                    small_bin
+                        .contains_alignments_bitmap
+                        .contains_aligment_greater_or_equal_to(alignment)
+                })
+                .map(move |smallbin| {
+                    // get all the sub-bins with a valid alignment
+                    smallbin.alignment_sub_bins[alignment_index..]
+                        .iter()
+                        .filter_map(|sub_bin| {
+                            // for each sub-bin, get the first chunk.
+                            // it is enough to only check the first chunk because all chunks have
+                            // the same size and alignment.
+                            sub_bin.fd
+                        })
+                })
+                .flatten()
+                .next()
+        }
     }
 }
 
 /// A small bin, which is made up of alignment sub-bins.
 #[derive(Clone, Copy, Debug)]
-pub struct SmallBin {
+pub struct SmallBin<const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     pub(crate) alignment_sub_bins: [AlignmentSubBin; ALIGNMENT_SUB_BINS_AMOUNT],
-    pub(crate) contains_alignments_bitmap: ContainsAlignmentsBitmap,
+    pub(crate) contains_alignments_bitmap: ContainsAlignmentsBitmap<ALIGNMENT_SUB_BINS_AMOUNT>,
 }
 
-impl SmallBin {
+impl<const ALIGNMENT_SUB_BINS_AMOUNT: usize> SmallBin<ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     /// Creates a new empty smallbin
     pub const fn new() -> Self {
         Self {
@@ -417,7 +431,11 @@ impl SmallBin {
     }
 }
 
-impl Default for SmallBin {
+impl<const ALIGNMENT_SUB_BINS_AMOUNT: usize> Default for SmallBin<ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     fn default() -> Self {
         Self::new()
     }
@@ -470,35 +488,47 @@ impl<'a> Iterator for AlignmentSubBinChunks<'a> {
 /// A bitmap which tells us whether the bin that this bitmap belongs to contains
 /// a chunk with a specific alignment.
 #[derive(Clone, Copy, Debug)]
-pub struct ContainsAlignmentsBitmap {
-    bitmap: AlignmentSubBinsBitmapType,
+pub struct ContainsAlignmentsBitmap<const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
+    bitmap: SmallestTypeWhichHasAtLeastNBits<ALIGNMENT_SUB_BINS_AMOUNT>,
 }
 
-impl ContainsAlignmentsBitmap {
+impl<const ALIGNMENT_SUB_BINS_AMOUNT: usize> ContainsAlignmentsBitmap<ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     /// Creates a new empty contains alignments bitmap, which indicates that the
     /// smallbin contains no alignments.
     pub const fn new() -> Self {
-        Self { bitmap: 0 }
+        Self {
+            bitmap: SmallestTypeWhichHasAtLeastNBits::<ALIGNMENT_SUB_BINS_AMOUNT>::ZERO,
+        }
     }
 
     /// Checks if the smallbin with the given index contains a chunk with an
     /// alignment greater than or equal to the given alignment.
     pub fn contains_aligment_greater_or_equal_to(&self, alignment: usize) -> bool {
-        self.bitmap as usize >= (alignment >> MIN_ALIGNMENT_LOG2)
+        self.bitmap.to_usize() >= (alignment >> MIN_ALIGNMENT_LOG2)
     }
 
     /// Marks the bitmap such that it indicates that a chunk with the given
     /// alignment index is present in the smallbin.
     pub fn set_contains_alignment(&mut self, alignment_index: usize) {
         let alignment = 1 << alignment_index;
-        self.bitmap |= alignment as AlignmentSubBinsBitmapType;
+        self.bitmap |=
+            SmallestTypeWhichHasAtLeastNBits::<ALIGNMENT_SUB_BINS_AMOUNT>::from_usize(alignment);
     }
 
     /// Marks the bitmap such that it indicates that a chunk with the given
     /// alignment index is not present in the smallbin.
     pub fn unset_contains_alignment(&mut self, alignment_index: usize) {
         let alignment = 1 << alignment_index;
-        self.bitmap &= !(alignment as AlignmentSubBinsBitmapType);
+        self.bitmap &=
+            !(SmallestTypeWhichHasAtLeastNBits::<ALIGNMENT_SUB_BINS_AMOUNT>::from_usize(alignment));
     }
 }
 

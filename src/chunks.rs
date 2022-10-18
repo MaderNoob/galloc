@@ -1,7 +1,12 @@
 use core::ptr::NonNull;
 
 use crate::{
-    bins::SmallBins, divisible_by_4_usize::DivisbleBy4Usize, Allocator, HEADER_SIZE, USIZE_SIZE,
+    bins::SmallBins,
+    divisible_by_4_usize::DivisbleBy4Usize,
+    smallest_type_which_has_at_least_n_bits::{
+        SmallestTypeWhichHasAtLeastNBitsStruct, SmallestTypeWhichHasAtLeastNBitsTrait,
+    },
+    Allocator, HEADER_SIZE, USIZE_SIZE,
 };
 
 /// A chunk in the heap.
@@ -330,7 +335,17 @@ impl FreeChunk {
 
     /// Sets the size of this free chunk, updates the postfix size, and updates
     /// the bin that this chunk is in, if needed.
-    pub fn set_size_and_update_bin(&mut self, new_size: usize, allocator: &mut Allocator) {
+    pub fn set_size_and_update_bin<
+        const SMALLBINS_AMOUNT: usize,
+        const ALIGNMENT_SUB_BINS_AMOUNT: usize,
+    >(
+        &mut self,
+        new_size: usize,
+        allocator: &mut Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         // we are about to change the size of the chunk, so it might have to change
         // bins.
         //
@@ -341,14 +356,19 @@ impl FreeChunk {
         // SAFETY: we provide a size of an actual chunk, thus it must have already been
         // prepared.
         if unsafe {
-            SmallBins::is_smallbin_size(self.size()) || SmallBins::is_smallbin_size(new_size)
+            SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::is_smallbin_size(self.size())
+                || SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::is_smallbin_size(
+                    new_size,
+                )
         } {
             // if this chunk was in a smallbin and its size was changed, move it to another
             // bin. get fd and bk for the new size of the chunk
             let (fd, bk) = unsafe {
                 allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
                     new_size,
-                    SmallBins::alignment_index_of_chunk_content_addr(self.content_addr()),
+                    SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                        self.content_addr(),
+                    ),
                 )
             };
             // SAFETY: right after re-linking we update the size.
@@ -358,8 +378,8 @@ impl FreeChunk {
         *self.postfix_size() = new_size;
     }
 
-    /// Marks this free chunk as used, but without updating the linked list of free chunks,
-    /// and without updating the next chunk.
+    /// Marks this free chunk as used, but without updating the linked list of
+    /// free chunks, and without updating the next chunk.
     ///
     /// # Safety
     ///
@@ -403,11 +423,18 @@ impl FreeChunk {
     /// If unlinking this chunk emptied the alignment sub-bin that this chunk
     /// was in, updates the contains alignments bitmap of the smallbin to
     /// indicate that.
-    pub fn mark_as_used_unlink(
+    pub fn mark_as_used_unlink<
+        const SMALLBINS_AMOUNT: usize,
+        const ALIGNMENT_SUB_BINS_AMOUNT: usize,
+    >(
         &mut self,
         heap_end_addr: usize,
-        smallbins: &mut SmallBins,
-    ) -> UsedChunkRef {
+        smallbins: &mut SmallBins<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) -> UsedChunkRef
+    where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         // this is safe because we then unlink it.
         let _ = unsafe { self.mark_as_used_without_updating_freelist(heap_end_addr) };
 
@@ -482,14 +509,23 @@ impl FreeChunk {
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
     ///  - The chunk's next chunk, if any, must be updated that its previous
     ///    chunk is now free.
-    pub unsafe fn create_new_without_updating_next_chunk(
+    pub unsafe fn create_new_without_updating_next_chunk<
+        const SMALLBINS_AMOUNT: usize,
+        const ALIGNMENT_SUB_BINS_AMOUNT: usize,
+    >(
         addr: usize,
         size: usize,
-        allocator: &mut Allocator,
-    ) -> FreeChunkRef {
+        allocator: &mut Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) -> FreeChunkRef
+    where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         let (fd, bk) = allocator.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
             size,
-            SmallBins::alignment_index_of_chunk_content_addr(addr + HEADER_SIZE),
+            SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                addr + HEADER_SIZE,
+            ),
         );
         FreeChunk::create_new_without_updating_next_chunk_using_custom_fd_and_bk(addr, size, fd, bk)
     }
@@ -509,11 +545,18 @@ impl FreeChunk {
     ///  - `addr` must be a valid non-null memory address which is not used by
     ///    any other chunk.
     ///  - `size` must be aligned to `CHUNK_SIZE_ALIGNMENT`.
-    pub unsafe fn create_new_and_update_next_chunk(
+    pub unsafe fn create_new_and_update_next_chunk<
+        const SMALLBINS_AMOUNT: usize,
+        const ALIGNMENT_SUB_BINS_AMOUNT: usize,
+    >(
         addr: usize,
         size: usize,
-        allocator: &mut Allocator,
-    ) -> FreeChunkRef {
+        allocator: &mut Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) -> FreeChunkRef
+    where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         // this is safe because right after it we update the next chunk
         let free_chunk = FreeChunk::create_new_without_updating_next_chunk(addr, size, allocator);
 
@@ -538,7 +581,13 @@ impl FreeChunk {
     ///
     /// You must make sure to make use of this chunk and keep track of it,
     /// do not lose the memory.
-    pub unsafe fn unlink(&mut self, smallbins: &mut SmallBins) {
+    pub unsafe fn unlink<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>(
+        &mut self,
+        smallbins: &mut SmallBins<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         // remember if this chunk was the last chunk in the freelist.
         //
         // this can save us the part where we update the smallbin, because if we know
@@ -581,11 +630,16 @@ impl FreeChunk {
             //
             // also, the given size is the size of an actual chunk, which must have
             // already been prepared.
-            let smallbin_index = SmallBins::smallbin_index_unchecked(self.size());
+            let smallbin_index =
+                SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::smallbin_index_unchecked(
+                    self.size(),
+                );
             let alignment_index = {
                 // SAFETY: the provided content address is the content address of an actual
                 // chunk, so it must be aligned.
-                SmallBins::alignment_index_of_chunk_content_addr(self.content_addr())
+                SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                    self.content_addr(),
+                )
             };
             smallbins.update_smallbin_after_removing_chunk_from_its_sub_bin(
                 smallbin_index,
@@ -606,12 +660,15 @@ impl FreeChunk {
     /// You must update this chunk's size to fit the new bin that it's now in,
     /// right after calling this function, but not before it, because then
     /// unlink would use a wrong size.
-    pub unsafe fn relink(
+    pub unsafe fn relink<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>(
         &mut self,
-        smallbins: &mut SmallBins,
+        smallbins: &mut SmallBins<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
         fd: Option<FreeChunkPtr>,
         ptr_to_fd_of_bk: *mut Option<FreeChunkPtr>,
-    ) {
+    ) where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         self.unlink(smallbins);
 
         // make this chunk point to the given fd and bk.
@@ -637,16 +694,25 @@ impl FreeChunk {
     ///
     /// You must make sure that the next chunk after moving this chunk to its
     /// new location knows that its prev chunk is now free.
-    pub unsafe fn move_and_resize_chunk_without_updating_next_chunk(
+    pub unsafe fn move_and_resize_chunk_without_updating_next_chunk<
+        const SMALLBINS_AMOUNT: usize,
+        const ALIGNMENT_SUB_BINS_AMOUNT: usize,
+    >(
         &mut self,
         new_addr: usize,
         new_size: usize,
-        allocator: &mut Allocator,
-    ) -> FreeChunkRef {
+        allocator: &mut Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
+    ) -> FreeChunkRef
+    where
+        SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+            SmallestTypeWhichHasAtLeastNBitsTrait,
+    {
         // if the chunk was already in a smallbin, or will now move to a smaillbin, it
         // means we need to change bins. Otherwise it was in the other bin and stays
         // there, so we don't need to change bins.
-        if SmallBins::is_smallbin_size(self.size()) || SmallBins::is_smallbin_size(new_size) {
+        if SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::is_smallbin_size(self.size())
+            || SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::is_smallbin_size(new_size)
+        {
             // we need to change bins.
 
             // unlink the current chunk

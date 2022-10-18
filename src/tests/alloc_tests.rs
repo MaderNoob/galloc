@@ -4,8 +4,12 @@ use super::*;
 
 #[test]
 fn alloc_no_memory() {
-    let mut allocator = Allocator::empty();
-    let allocated = unsafe { allocator.alloc(Layout::from_size_align(1, 1).unwrap()) };
+    let mut guard = AllocatorInitGuard::empty();
+    let allocated = unsafe {
+        guard
+            .allocator
+            .alloc(Layout::from_size_align(1, 1).unwrap())
+    };
 
     assert!(allocated.is_null())
 }
@@ -253,9 +257,16 @@ fn alloc_unaligned_no_end_padding() {
     // make sure the start padding chunk points back to the correct bin.
 
     // we know its in a smallbin since its size is really small.
-    let smallbin_index = unsafe { SmallBins::smallbin_index(start_padding_chunk.size()).unwrap() };
+    let smallbin_index = unsafe {
+        SmallBins::<TEST_SMALLBINS_AMOUNT, TEST_ALIGNMENT_SUB_BINS_AMOUNT>::smallbin_index(
+            start_padding_chunk.size(),
+        )
+        .unwrap()
+    };
     let alignment_index = unsafe {
-        SmallBins::alignment_index_of_chunk_content_addr(start_padding_chunk.content_addr())
+        SmallBins::<TEST_SMALLBINS_AMOUNT, TEST_ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+            start_padding_chunk.content_addr(),
+        )
     };
 
     let ptr_to_fd_of_bin = &mut guard.allocator.smallbins.small_bins[smallbin_index]

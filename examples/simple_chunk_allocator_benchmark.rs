@@ -28,6 +28,7 @@ use std::{
     time::Instant,
 };
 
+use good_memory_allocator::DEFAULT_SMALLBINS_AMOUNT;
 use rand::Rng;
 use simple_chunk_allocator::{GlobalChunkAllocator, DEFAULT_CHUNK_SIZE};
 
@@ -69,7 +70,8 @@ fn main() {
 
     let bench_res_2 = benchmark_allocator(&mut linked_list_allocator);
 
-    let mut galloc_allocator = good_memory_allocator::SpinLockedAllocator::empty();
+    let mut galloc_allocator =
+        good_memory_allocator::SpinLockedAllocator::<DEFAULT_SMALLBINS_AMOUNT>::empty();
     unsafe {
         galloc_allocator.init(HEAP_MEMORY.0.as_ptr() as usize, HEAP_SIZE);
     }

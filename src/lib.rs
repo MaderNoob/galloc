@@ -15,7 +15,7 @@
 //!
 //! Create a static allocator:
 //!
-//! ```rust
+//! ```ignore
 //! use good_memory_allocator::SpinLockedAllocator;
 //!
 //! #[global_allocator]
@@ -24,13 +24,41 @@
 //!
 //! Before using this allocator, you need to initialize it:
 //!
-//! ```rust
+//! ```ignore
 //! pub fn init_heap() {
 //!     unsafe {
 //!         ALLOCATOR.init(heap_start, heap_size);
 //!     }
 //! }
 //! ```
+//!
+//! ## `SMALLBINS_AMOUNT` and `ALIGNMENT_SUB_BINS_AMOUNT`.
+//!
+//! The allocator allows configuring the amount of smallbins and alignment
+//! sub-bins that it uses. For those of you not familiar with smallbins, they
+//! are data structures used by the allocator to keep track of free chunks. Each
+//! smallbin is made up of multiple alignment sub-bins. The default amounts of
+//! smallbins and alignment sub-bins used by the allocator are stored in their
+//! respective constant [`DEFAULT_SMALLBINS_AMOUNT`] and
+//! [`DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT`].
+//!
+//! Increasing the amount of smallbins will improve runtime performance and
+//! memory utilization, especially when you are making a lot of relatively small
+//! allocation, but it will also increase the size of the [`Allocator`] struct.
+//!
+//! Increasing the amount of alignment sub-bins will will also improve runtime
+//! performance and memory utilization, especially when you are making a lot of
+//! allocations with relatively large alignments, but it will also increase the
+//! size of the [`Allocator`] struct.
+//! It is recommended to choose a value that is a power of 2 for the alignemnt
+//! sub-bins amount, since that will improve the memory utilization of the
+//! smallbins' memory.
+//! The amount of alignment sub bins must be at least 2, otherwise you will get
+//! a compilation error.
+//!
+//! If you are in a memory constrained environment, you might want to use lower
+//! values for these constants, since the size of the [`Allocator`] struct using
+//! the default values is relatively large.
 //!
 //! ## Features
 //!
@@ -47,6 +75,7 @@ mod alignment;
 mod bins;
 mod chunks;
 mod divisible_by_4_usize;
+mod smallest_type_which_has_at_least_n_bits;
 
 #[cfg(test)]
 mod tests;
@@ -55,7 +84,11 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use alignment::*;
 use bins::SmallBins;
+pub use bins::{DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT, DEFAULT_SMALLBINS_AMOUNT};
 use chunks::*;
+use smallest_type_which_has_at_least_n_bits::{
+    SmallestTypeWhichHasAtLeastNBitsStruct, SmallestTypeWhichHasAtLeastNBitsTrait,
+};
 use static_assertions::const_assert;
 
 const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
@@ -73,13 +106,28 @@ const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
 const_assert!(MIN_ALIGNMENT >= 4);
 
 /// A linked list memory allocator.
+///
+/// This allocator allows configuring the amount of smallbins and alignment
+/// sub-bins that it uses. For more information about this value, read the
+/// crate's top level documentation.
 #[derive(Debug)]
-pub struct Allocator {
-    smallbins: SmallBins,
+pub struct Allocator<
+    const SMALLBINS_AMOUNT: usize = DEFAULT_SMALLBINS_AMOUNT,
+    const ALIGNMENT_SUB_BINS_AMOUNT: usize = DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT,
+> where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
+    smallbins: SmallBins<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>,
     heap_end_addr: usize,
     fake_chunk_of_other_bin: FakeFreeChunk,
 }
-impl Allocator {
+impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+    Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     /// Creates an empty heap allocator without any heap memory region, which
     /// will always return null on allocation requests.
     ///
@@ -206,7 +254,9 @@ impl Allocator {
     ) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
         // SAFETY: this is safe because `chunk_size` is the size of an actual chunk, so
         // it must have already been prepared.
-        if let Some(smallbin_index) = SmallBins::smallbin_index(chunk_size) {
+        if let Some(smallbin_index) =
+            SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::smallbin_index(chunk_size)
+        {
             self.smallbins
                 .get_fd_and_bk_pointers_for_inserting_to_smallbin(
                     smallbin_index,
@@ -274,11 +324,18 @@ impl Allocator {
 
         let (layout_size, layout_align) = Self::prepare_layout(layout);
 
-        let alignment_index_if_size_is_smallbin_size = if SmallBins::is_smallbin_size(layout_size) {
-            Some(SmallBins::alignment_index(layout_align))
-        } else {
-            None
-        };
+        let alignment_index_if_size_is_smallbin_size =
+            if SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::is_smallbin_size(
+                layout_size,
+            ) {
+                Some(
+                    SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index(
+                        layout_align,
+                    ),
+                )
+            } else {
+                None
+            };
 
         // if the allocation size is the size of a smallbin, allocate from optimal
         // chunks from the smallbins.
@@ -478,7 +535,9 @@ impl Allocator {
                 // alignment returned from `Chunk::alignment` is always a power of 2.
                 let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
                     chunk.0.size(),
-                    SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
+                    SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                        chunk.content_addr(),
+                    ),
                 );
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
             },
@@ -503,7 +562,9 @@ impl Allocator {
                 // was `next_chunk_free`.
                 let (fd, bk) = self.get_fd_and_bk_pointers_for_inserting_new_free_chunk(
                     chunk.0.size(),
-                    SmallBins::alignment_index_of_chunk_content_addr(chunk.content_addr()),
+                    SmallBins::<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                        chunk.content_addr(),
+                    ),
                 );
                 let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
             },
@@ -1058,14 +1119,31 @@ impl Allocator {
     }
 }
 
-unsafe impl Send for Allocator {}
+unsafe impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize> Send
+    for Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
+}
 
 /// A spin locked memory allocator that can be used as the global allocator.
 #[cfg(feature = "spin")]
-pub struct SpinLockedAllocator(spin::Mutex<Allocator>);
+pub struct SpinLockedAllocator<
+    const SMALLBINS_AMOUNT: usize = DEFAULT_SMALLBINS_AMOUNT,
+    const ALIGNMENT_SUB_BINS_AMOUNT: usize = DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT,
+>(spin::Mutex<Allocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>>)
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait;
 
 #[cfg(feature = "spin")]
-impl SpinLockedAllocator {
+impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+    SpinLockedAllocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     /// Creates an empty locked heap allocator without any heap memory region,
     /// which will always return null on allocation requests.
     ///
@@ -1099,7 +1177,12 @@ impl SpinLockedAllocator {
 }
 
 #[cfg(feature = "spin")]
-unsafe impl core::alloc::GlobalAlloc for SpinLockedAllocator {
+unsafe impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+    core::alloc::GlobalAlloc for SpinLockedAllocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.0.lock();
         allocator.alloc(layout)
@@ -1117,7 +1200,12 @@ unsafe impl core::alloc::GlobalAlloc for SpinLockedAllocator {
 }
 
 #[cfg(feature = "allocator")]
-unsafe impl core::alloc::Allocator for SpinLockedAllocator {
+unsafe impl<const SMALLBINS_AMOUNT: usize, const ALIGNMENT_SUB_BINS_AMOUNT: usize>
+    core::alloc::Allocator for SpinLockedAllocator<SMALLBINS_AMOUNT, ALIGNMENT_SUB_BINS_AMOUNT>
+where
+    SmallestTypeWhichHasAtLeastNBitsStruct<ALIGNMENT_SUB_BINS_AMOUNT>:
+        SmallestTypeWhichHasAtLeastNBitsTrait,
+{
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         let mut allocator = self.0.lock();
 

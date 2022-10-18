@@ -29,6 +29,33 @@ pub fn init_heap() {
 }
 ```
 
+## `SMALLBINS_AMOUNT` and `ALIGNMENT_SUB_BINS_AMOUNT`.
+
+The allocator allows configuring the amount of smallbins and alignment
+sub-bins that it uses. For those of you not familiar with smallbins, they
+are data structures used by the allocator to keep track of free chunks. Each
+smallbin is made up of multiple alignment sub-bins. The default amounts of
+smallbins and alignment sub-bins used by the allocator are stored in their
+respective constant `DEFAULT_SMALLBINS_AMOUNT` and
+`DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT`.
+
+Increasing the amount of smallbins will improve runtime performance and
+memory utilization, especially when you are making a lot of relatively small
+allocation, but it will also increase the size of the `Allocator` struct.
+
+Increasing the amount of alignment sub-bins will will also improve runtime
+performance and memory utilization, especially when you are making a lot of
+allocations with relatively large alignments, but it will also increase the
+size of the `Allocator` struct.
+It is recommended to choose a value that is a power of 2 for the alignemnt
+sub-bins amount, since that will improve the memory utilization of the
+smallbins' memory.
+The amount of alignment sub bins must be at least 2, otherwise you will get a compilation error.
+
+If you are in a memory constrained environment, you might want to use lower
+values for these constants, since the size of the `Allocator` struct using
+the default values is relatively large.
+
 ## Features
 
 - **`spin`** (default): Provide a `SpinLockedAllocator` type that implements the `GlobalAlloc` trait by using a spinlock.

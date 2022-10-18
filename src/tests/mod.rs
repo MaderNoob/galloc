@@ -7,6 +7,9 @@ use std::vec::Vec;
 
 use super::*;
 
+const TEST_SMALLBINS_AMOUNT: usize = DEFAULT_SMALLBINS_AMOUNT;
+const TEST_ALIGNMENT_SUB_BINS_AMOUNT: usize = DEFAULT_ALIGNMENT_SUB_BINS_AMOUNT;
+
 #[test]
 fn random_alloc_dealloc_realloc() {
     const MEM_SIZE: usize = USIZE_SIZE * 113;
@@ -159,10 +162,15 @@ fn get_expected_fd_and_bk_for_chunk_with_size(
     content_addr: usize,
     guard: &mut AllocatorInitGuard,
 ) -> (Option<FreeChunkPtr>, *mut Option<FreeChunkPtr>) {
-    match unsafe { SmallBins::smallbin_index(size) } {
+    match unsafe {
+        SmallBins::<TEST_SMALLBINS_AMOUNT, TEST_ALIGNMENT_SUB_BINS_AMOUNT>::smallbin_index(size)
+    } {
         Some(smallbin_index) => {
-            let alignment_index =
-                unsafe { SmallBins::alignment_index_of_chunk_content_addr(content_addr) };
+            let alignment_index = unsafe {
+                SmallBins::<TEST_SMALLBINS_AMOUNT,TEST_ALIGNMENT_SUB_BINS_AMOUNT>::alignment_index_of_chunk_content_addr(
+                    content_addr,
+                )
+            };
             let sub_bin = &mut guard.allocator.smallbins.small_bins[smallbin_index]
                 .alignment_sub_bins[alignment_index];
             (None, &mut sub_bin.fd as *mut _)
@@ -183,7 +191,7 @@ fn get_expected_fd_and_bk_for_chunk_with_size(
 struct AllocatorInitGuard {
     addr: usize,
     layout: Layout,
-    allocator: Allocator,
+    allocator: Allocator<TEST_SMALLBINS_AMOUNT, TEST_ALIGNMENT_SUB_BINS_AMOUNT>,
 }
 impl AllocatorInitGuard {
     /// Creates an empty allocator init guard.
