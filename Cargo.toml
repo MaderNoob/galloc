@@ -1,9 +1,9 @@
 [package]
 name = "good_memory_allocator"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Roee Shoshani", "Guy Nir"]
-description = "A blazingly fast memory allocator usable for `no_std` environments."
+description = "A blazingly fast and memory efficient memory allocator to be used in `no_std` environments."
 repository = "https://github.com/MaderNoob/galloc"
 keywords = ["allocator", "no_std", "malloc", "heap", "kernel"]
 categories = ["memory-management", "no-std", "algorithms", "data-structures", "embedded"]
@@ -14,12 +14,10 @@ license = "MIT"
 
 [dependencies]
 spin = { version = "0.9.4", optional = true }
-static_assertions = "1.1.0"
 either = { version = "1.8.0", default-features = false }
-num-traits = { version = "0.2.15", default-features = false }
 
 [dev-dependencies]
-rand =  { version = "0.8.5", features = ["small_rng"] }
+rand =  "0.8.5"
 good_memory_allocator = { path = ".", features = ["spin", "allocator"] }
 linked_list_allocator = { version = "0.10.3", features =  ["use_spin_nightly", "const_mut_refs", "alloc_ref"] }
 simple-chunk-allocator = "0.1.5"

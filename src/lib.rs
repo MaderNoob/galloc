@@ -89,10 +89,13 @@ use chunks::*;
 use smallest_type_which_has_at_least_n_bits::{
     SmallestTypeWhichHasAtLeastNBitsStruct, SmallestTypeWhichHasAtLeastNBitsTrait,
 };
-use static_assertions::const_assert;
 
 const USIZE_ALIGNMENT: usize = core::mem::align_of::<usize>();
 const USIZE_SIZE: usize = core::mem::size_of::<usize>();
+
+// IMPORTANT:
+// `MIN_ALIGNMENT` must be larger than 4, so that storing the size as a
+// `DivisibleBy4Usize` is safe.
 const MIN_ALIGNMENT: usize = if USIZE_ALIGNMENT < 8 {
     8
 } else {
@@ -100,10 +103,6 @@ const MIN_ALIGNMENT: usize = if USIZE_ALIGNMENT < 8 {
 };
 const MIN_FREE_CHUNK_SIZE_INCLUDING_HEADER: usize = core::mem::size_of::<FreeChunk>() + USIZE_SIZE;
 const HEADER_SIZE: usize = core::mem::size_of::<Chunk>();
-
-// `MIN_ALIGNMENT` must be larger than 4, so that storing the size as a
-// `DivisibleBy4Usize` is safe.
-const_assert!(MIN_ALIGNMENT >= 4);
 
 /// A linked list memory allocator.
 ///
@@ -296,7 +295,7 @@ where
                         self.fake_chunk_of_other_bin.ptr_to_fd_of_bk,
                     )
                 }
-            },
+            }
             // if the other bin is empty, put this chunk as the first chunk in the bin.
             None => (
                 // SAFETY: the fake chunk will be used as the fd of some other chunk, but chunks
@@ -540,7 +539,7 @@ where
                     ),
                 );
                 let _ = chunk.mark_as_free(fd, bk, self.heap_end_addr);
-            },
+            }
             (None, Some(next_chunk_free)) => {
                 // for this case, we create a free chunk where the deallocated chunk is,
                 // which will consolidate itself and the next chunk into one big free chunk.
@@ -567,7 +566,7 @@ where
                     ),
                 );
                 let _ = chunk.mark_as_free_without_updating_next_chunk(fd, bk);
-            },
+            }
             (Some(prev_chunk_free), None) => {
                 // for this case, just resize the prev chunk to consolidate it with the current
                 // chunk. in other words, make it large enough so that it includes the entire
@@ -585,7 +584,7 @@ where
                 if let Some(next_chunk_addr) = chunk.0.next_chunk_addr(self.heap_end_addr) {
                     Chunk::set_prev_in_use_for_chunk_with_addr(next_chunk_addr, false);
                 }
-            },
+            }
             (Some(prev_chunk_free), Some(next_chunk_free)) => {
                 // for this case, we want to make the prev chunk large enough to include both
                 // this and the next chunk.
@@ -615,7 +614,7 @@ where
                 // also, there's no need to update the next chunk of
                 // `next_free_chunk`, because that chunk already knows that its
                 // prev is free.
-            },
+            }
         }
     }
 
@@ -710,7 +709,7 @@ where
             // if the next chunk is not free, we can't grow this chunk in place.
             None => {
                 return false;
-            },
+            }
         };
 
         // calculate the new end addresss of the chunk.
@@ -810,7 +809,7 @@ where
 
                 // resize `chunk` to the desired size.
                 chunk.set_size(new_size);
-            },
+            }
             None => {
                 // calculate how much space we have left at the end of this chunk after
                 // shrinking.
@@ -842,7 +841,7 @@ where
                     // copying the entire memory, but it wastes a little bit of
                     // memory (up to 32 bytes).
                 }
-            },
+            }
         }
     }
 
