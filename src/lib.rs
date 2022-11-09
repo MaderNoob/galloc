@@ -1173,6 +1173,12 @@ where
         let mut allocator = self.0.lock();
         allocator.init(heap_start_addr, heap_size);
     }
+
+    /// Checks if the heap memory region was already initialized by calling init.
+    pub fn was_initialized(&self) -> bool {
+        let allocator = self.0.lock();
+        allocator.was_initialized()
+    }
 }
 
 #[cfg(feature = "spin")]
